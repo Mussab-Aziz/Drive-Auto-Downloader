@@ -1,0 +1,13 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OAuth and local secrets
+token.json
+client_secret_file.json
+credentials.json
+client_secret*.json
+
+# Local environment files
+.env
+.env.*
