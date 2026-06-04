@@ -10,17 +10,21 @@ This is a complete automation tool for downloading entire Google Drive folders w
 - Download entire Google Drive folders with all subfolders intact
 - Preserve folder structure on local disk
 - Filter out unwanted file types (photos, videos, audio)
-- User-friendly GUI interface
+- Professional, modern GUI interface with CustomTkinter
 - Auto-save configuration between sessions
-- Progress tracking and detailed logging
+- Real-time progress tracking and detailed logging
 - Retry logic for failed downloads
 - Support for large folders with pagination
+- **Multi-account support** - Switch between different Google accounts
+- **Smart error handling** - Clear messages for access denied, folder not found, and authentication issues
+- **In-app authentication** - View login URLs directly in the console
 
 ## Files Included
 
 1. **app_ui.py** - The main GUI application (start here!)
-2. **enhanced_downloader.py** - Core download engine with recursive folder support
-3. **auto_downloader.py** - Command-line version (original)
+2. **enhanced_downloader.py** - Core download engine with recursive folder support and comprehensive error handling
+3. **requirements.txt** - Python dependencies
+4. **GOOGLE_DRIVE_SETUP.md** - Detailed Google Drive API setup guide
 
 ## Setup Instructions
 
@@ -81,8 +85,8 @@ Check any of these to **skip** downloading those file types:
 
 1. Fill in all required fields
 2. Select any file types you want to skip
-3. Click **"Start Download"**
-4. Watch the progress in the log window
+3. Click **"▶ Start Download"**
+4. Watch the progress in the console window
 5. Automatic retry (up to 5 times) for any failed downloads
 
 **The app will:**
@@ -92,15 +96,14 @@ Check any of these to **skip** downloading those file types:
 - Skip Google native files (Google Docs, Sheets, etc.)
 - Show detailed progress for each file
 
-## Command-Line Usage (Legacy)
+### Switching Google Accounts
 
-If you prefer command-line, you can still use `auto_downloader.py`:
+If you need to access a folder with a different Google account:
 
-```bash
-python auto_downloader.py
-```
-
-Edit the `FOLDER_ID` and `DOWNLOAD_DIR` variables in the script to customize.
+1. Click the **"🔄 Switch Account"** button in the Authentication section
+2. Confirm the action when prompted
+3. On your next download, you'll be asked to authenticate with a different account
+4. Your new account's token will be saved for future downloads
 
 ## First-Time Authentication
 
@@ -112,24 +115,30 @@ When you click "Start Download" for the first time:
 
 ## Troubleshooting
 
-### "No files found in the specified folder"
-- Double-check your Folder ID is correct
-- Make sure the folder has files you can access
-- Ensure your Google credentials have read access
+### "Access Denied" (Error 403)
+- You don't have permission to access this folder
+- Use the **"🔄 Switch Account"** button to try with a different Google account
+- Ask the folder owner to grant you access
 
-### "Token file error"
-- Delete `token.json` to force re-authentication
-- Verify your client secret file is valid
+### "Folder Not Found" (Error 404)
+- Double-check your Folder ID is correct
+- Make sure the folder link is still valid
+- Verify the folder hasn't been deleted or moved
+
+### "Authentication Failed" (Error 401)
+- Click **"🔄 Switch Account"** to re-authenticate
+- Or delete your `token.json` file to force re-authentication
+- Ensure your Google credentials file is valid
+
+### "No files found in the specified folder"
+- The folder exists and you have access, but it's empty
+- Make sure you're downloading from the correct folder
+- Check that files aren't filtered out by your filter settings
 
 ### Download interrupted
 - The app automatically retries up to 5 times
 - Your partially downloaded files are preserved
 - Run the download again - already downloaded files will be skipped
-
-### Permission Denied
-- Verify your credentials file is properly formatted
-- Check that your Google account has access to the folder
-- Re-authenticate by deleting `token.json`
 
 ## Advanced: Modifying Download Behavior
 
