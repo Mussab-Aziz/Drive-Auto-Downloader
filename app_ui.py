@@ -562,7 +562,7 @@ class DownloadAutomationUI:
             else:
                 self.log_message("\n[SUCCESS] Download completed!")
 
-        except Exception as e:
+        except Exception:
             # Error already logged by downloader, just ensure no success message is shown
             pass
             
