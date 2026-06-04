@@ -193,9 +193,9 @@ class GoogleDriveDownloader:
             if error_code == 404:
                 raise Exception(f"❌ Folder not found (HTTP 404). The folder ID '{folder_id}' does not exist, may have been deleted, or you have no access to it.")
             elif error_code == 403:
-                raise Exception(f"❌ Access denied (HTTP 403). You don't have permission to access this folder. Please verify the folder is shared with your Google account.")
+                raise Exception("❌ Access denied (HTTP 403). You don't have permission to access this folder. Please verify the folder is shared with your Google account.")
             elif error_code == 401:
-                raise Exception(f"❌ Authentication failed (HTTP 401). Your credentials may have expired. Please delete token.json and try again.")
+                raise Exception("❌ Authentication failed (HTTP 401). Your credentials may have expired. Please delete token.json and try again.")
             else:
                 raise Exception(f"❌ Google Drive API error (HTTP {error_code}): {str(e)}")
 
@@ -251,9 +251,9 @@ class GoogleDriveDownloader:
             except HttpError as e:
                 error_code = e.resp.status if e.resp else 500
                 if error_code == 403:
-                    raise Exception(f"❌ Access denied while accessing folder. You may not have permission to this subfolder.")
+                    raise Exception("❌ Access denied while accessing folder. You may not have permission to this subfolder.")
                 elif error_code == 404:
-                    raise Exception(f"❌ A folder in the path was not found or deleted.")
+                    raise Exception("❌ A folder in the path was not found or deleted.")
                 else:
                     raise Exception(f"❌ Google Drive API error: {str(e)}")
 
@@ -416,7 +416,7 @@ class GoogleDriveDownloader:
             self.log(
                 f"\n{'='*60}"
             )
-            self.log(f"Download completed!")
+            self.log("Download completed!")
             self.log(f"Downloaded: {self.downloaded_count} files")
             self.log(f"Skipped: {self.skipped_count} items")
             self.log(f"{'='*60}")
