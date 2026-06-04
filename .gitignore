@@ -1,0 +1,33 @@
+# Credentials and tokens
+client_secret_file.json
+token.json
+
+# User configuration
+ui_config.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build/distribution
+build/
+dist/
+*.egg-info/
