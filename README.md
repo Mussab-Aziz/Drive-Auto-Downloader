@@ -1,4 +1,4 @@
-# Google Drive Folder Downloader - Complete Setup Guide
+# Drive Auto Downloader - Complete Setup Guide
 
 ## Overview
 

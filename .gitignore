@@ -1,5 +1,5 @@
 # Credentials and tokens
-client_secret_file.json
+client_secret*.json
 token.json
 
 # User configuration
