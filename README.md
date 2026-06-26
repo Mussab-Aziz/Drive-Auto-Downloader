@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a complete automation tool for downloading entire Google Drive folders while preserving folder structures. It features a professional UI built with tkinter.
+Drive Auto Downloader is a powerful, web-based automation tool for downloading entire Google Drive folders while flawlessly preserving their directory structures. Powered by a modern React + FastAPI stack, it supports massive folders via API pagination, intelligently skips existing files to avoid duplicates, and features resilient retry logic for network interruptions.
 
 ## Features
 
@@ -10,7 +10,8 @@ This is a complete automation tool for downloading entire Google Drive folders w
 - Download entire Google Drive folders with all subfolders intact
 - Preserve folder structure on local disk
 - Filter out unwanted file types (photos, videos, audio)
-- Professional, modern GUI interface with CustomTkinter
+- Modern, responsive web interface (React + Vite)
+- Real-time streaming console logs directly in the browser
 - Auto-save configuration between sessions
 - Real-time progress tracking and detailed logging
 - Retry logic for failed downloads
@@ -19,19 +20,28 @@ This is a complete automation tool for downloading entire Google Drive folders w
 - **Smart error handling** - Clear messages for access denied, folder not found, and authentication issues
 - **In-app authentication** - View login URLs directly in the console
 
-## Files Included
+## Architecture & Files
 
-1. **app_ui.py** - The main GUI application (start here!)
-2. **enhanced_downloader.py** - Core download engine with recursive folder support and comprehensive error handling
-3. **requirements.txt** - Python dependencies
-4. **GOOGLE_DRIVE_SETUP.md** - Detailed Google Drive API setup guide
+- **`frontend/`** - The React web interface (Vite + React)
+- **`backend/`** - The Python FastAPI server and download engine
+- **`start.bat` / `start.ps1`** - One-click launchers for both servers
+- **`GOOGLE_DRIVE_SETUP.md`** - Detailed Google Drive API setup guide
 
 ## Setup Instructions
 
 ### Step 1: Install Required Dependencies
 
+Make sure you have **Node.js** and **Python 3** installed.
+
 ```bash
-pip install google-auth-oauthlib google-auth-httplib2 google-api-python-client
+# Install Python backend dependencies
+cd backend
+pip install -r requirements.txt
+
+# Install React frontend dependencies
+cd ../frontend
+npm install
+cd ..
 ```
 
 ### Step 2: Get Google Drive API Credentials
@@ -47,9 +57,15 @@ pip install google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
 ### Step 3: Run the Application
 
+On Windows, simply double-click the launcher:
+
 ```bash
-python app_ui.py
+start.bat
 ```
+
+*(Or right-click and run `start.ps1` with PowerShell).*
+
+This will automatically launch the backend and frontend servers and open the UI in your web browser at `http://localhost:5173`.
 
 This opens the GUI where you can:
 - Browse for your credentials files
@@ -69,10 +85,9 @@ This opens the GUI where you can:
 
 ### Configuration Steps
 
-1. **Source Folder ID**: Paste the Google Drive folder ID
+1. **Source Folder ID**: Paste the Google Drive folder ID or full link
 2. **Destination Folder**: Click "Browse" and select where to save files on your computer
-3. **Token File**: Select your `token.json` (will be auto-created on first run if doesn't exist)
-4. **Client Secret File**: Select your `client_secret_file.json` downloaded from Google Cloud
+3. **Client Secret File**: Click "Browse" and select your `client_secret_file.json` downloaded from Google Cloud
 
 ### File Type Filters
 
@@ -142,7 +157,7 @@ When you click "Start Download" for the first time:
 
 ## Advanced: Modifying Download Behavior
 
-Edit `enhanced_downloader.py` to customize:
+Edit `backend/enhanced_downloader.py` to customize:
 
 ```python
 # Add more MIME types to filter
