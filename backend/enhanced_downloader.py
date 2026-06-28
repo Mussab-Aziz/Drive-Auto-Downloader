@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import time
@@ -317,7 +318,7 @@ class GoogleDriveDownloader:
                 status, done = downloader.next_chunk(num_retries=3)
                 if status:
                     progress_percent = int(status.progress() * 100)
-                    self.log(f"Download Progress: {progress_percent}%")
+                    self.log(json.dumps({"type": "progress", "percent": progress_percent}))
                 retries = 0
                 
                 # Check for cancellation during download

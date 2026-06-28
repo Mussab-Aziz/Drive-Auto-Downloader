@@ -1,5 +1,19 @@
 import { useRef, useEffect } from 'react'
 
+function ProgressBar({ percent }) {
+  return (
+    <span className="log-progress-wrap">
+      <span className="log-progress-label">Status: {percent}%</span>
+      <span className="log-progress-track">
+        <span
+          className="log-progress-fill"
+          style={{ width: `${percent}%` }}
+        />
+      </span>
+    </span>
+  )
+}
+
 export default function Console({ logs, onClear }) {
   const boxRef = useRef(null)
 
@@ -35,11 +49,15 @@ export default function Console({ logs, onClear }) {
         {logs.length === 0 ? (
           <span className="log-empty">Waiting for download to start...</span>
         ) : (
-          logs.map((line, i) => (
-            <span key={i} className={`log-line ${line.type}`}>
-              {line.text || '\u00a0'}
-            </span>
-          ))
+          logs.map((line, i) =>
+            line.type === 'progress' ? (
+              <ProgressBar key={i} percent={line.percent} />
+            ) : (
+              <span key={i} className={`log-line ${line.type}`}>
+                {line.text || '\u00a0'}
+              </span>
+            )
+          )
         )}
       </div>
     </div>

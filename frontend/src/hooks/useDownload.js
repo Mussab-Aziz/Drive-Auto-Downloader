@@ -85,12 +85,36 @@ export function useDownload() {
       const raw = e.data
       if (raw === '__PING__') return
       if (raw === '__DONE__') {
+        // Clear any dangling progress entry
+        setLogs(prev => prev.filter(l => l.type !== 'progress'))
         setIsDownloading(false)
         setStatus('done')
         es.close()
         esRef.current = null
         return
       }
+
+      // Try to parse as a structured JSON message (e.g. progress)
+      try {
+        const parsed = JSON.parse(raw)
+        if (parsed.type === 'progress') {
+          setLogs(prev => {
+            const next = [...prev]
+            const lastIdx = next.length - 1
+            // Update in-place if the last entry is already a progress line
+            if (lastIdx >= 0 && next[lastIdx].type === 'progress') {
+              next[lastIdx] = { ...next[lastIdx], percent: parsed.percent }
+            } else {
+              next.push({ text: '', type: 'progress', percent: parsed.percent })
+            }
+            return next
+          })
+          return
+        }
+      } catch (_) {
+        // Not JSON – fall through to plain-text handling
+      }
+
       const text = raw.replace(/\\n/g, '\n')
       const lines = text.split('\n')
       setLogs(prev => [
