@@ -12,9 +12,11 @@ export default function App() {
     config,
     updateField,
     logs,
+    activeProgress,
     clearLogs,
     isDownloading,
     status,
+    overallProgress,
     startDownload,
     cancelDownload,
     switchAccount,
@@ -54,6 +56,7 @@ export default function App() {
             skipPhotos={config.skip_photos}
             skipVideos={config.skip_videos}
             skipAudio={config.skip_audio}
+            skipGoogleFiles={config.skip_google_files}
             onChange={updateField}
             disabled={isDownloading}
           />
@@ -62,7 +65,12 @@ export default function App() {
         {/* ── RIGHT PANEL: sticky console ────────────── */}
         <div className="right-panel">
           <div className="right-panel-inner">
-            <Console logs={logs} onClear={clearLogs} />
+            <Console
+              logs={logs}
+              onClear={clearLogs}
+              overallProgress={overallProgress}
+              activeProgress={activeProgress}
+            />
 
             {/* Inline action buttons inside right panel */}
             <div className="inline-action-bar">

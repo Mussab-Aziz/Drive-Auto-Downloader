@@ -31,3 +31,10 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# PyInstaller
+*.spec.bak
+__pycache__/
+
+# Inno Setup installer output
+installer_output/

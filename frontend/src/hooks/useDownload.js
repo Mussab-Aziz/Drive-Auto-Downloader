@@ -11,10 +11,13 @@ export function useDownload() {
     skip_photos: false,
     skip_videos: false,
     skip_audio: false,
+    skip_google_files: false,
   })
   const [logs, setLogs] = useState([])
+  const [activeProgress, setActiveProgress] = useState(null) // {percent, speedMbps, etaSec, sizeMb} | null
   const [isDownloading, setIsDownloading] = useState(false)
   const [status, setStatus] = useState('idle') // 'idle' | 'running' | 'done'
+  const [overallProgress, setOverallProgress] = useState(null) // {current, total} | null
   const esRef = useRef(null)
 
   // Load config on mount
@@ -44,33 +47,43 @@ export function useDownload() {
 
   // Browse folder
   const browseFolder = useCallback(async (field, title) => {
-    const res = await fetch('/api/browse/folder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title }),
-    })
-    const data = await res.json()
-    if (data.path) updateField(field, data.path)
+    try {
+      const res = await fetch('/api/browse/folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      })
+      if (!res.ok) throw new Error(`Server returned ${res.status}`)
+      const data = await res.json()
+      if (data.path) updateField(field, data.path)
+    } catch (err) {
+      setLogs(prev => [...prev, { text: `[ERROR] Browse failed: ${err.message ?? err}`, type: 'error' }])
+    }
   }, [updateField])
 
   // Browse file
   const browseFile = useCallback(async (field, title) => {
-    const res = await fetch('/api/browse/file', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title }),
-    })
-    const data = await res.json()
-    if (data.path) updateField(field, data.path)
+    try {
+      const res = await fetch('/api/browse/file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      })
+      if (!res.ok) throw new Error(`Server returned ${res.status}`)
+      const data = await res.json()
+      if (data.path) updateField(field, data.path)
+    } catch (err) {
+      setLogs(prev => [...prev, { text: `[ERROR] Browse failed: ${err.message ?? err}`, type: 'error' }])
+    }
   }, [updateField])
 
   // Classify log line for styling
   function classifyLine(line) {
     const l = line.toLowerCase()
-    if (l.includes('[success]') || l.includes('✓') || l.includes('completed')) return 'success'
+    if (l.includes('successfully') || l.includes('✓') || l.includes('[success]') || l.includes('completed')) return 'success'
     if (l.includes('[error]') || l.includes('❌') || l.includes('failed')) return 'error'
     if (l.includes('[!]') || l.includes('warning')) return 'warning'
-    if (l.includes('[info]') || l.includes('starting') || l.includes('building') || l.includes('verifying') || l.includes('scanning')) return 'info'
+    if (l.includes('[info]') || l.includes('starting') || l.includes('building') || l.includes('verifying') || l.includes('scanning') || l.includes('downloading:')) return 'info'
     if (l.includes('skipping')) return 'dim'
     return 'default'
   }
@@ -85,38 +98,63 @@ export function useDownload() {
       const raw = e.data
       if (raw === '__PING__') return
       if (raw === '__DONE__') {
-        // Clear any dangling progress entry
-        setLogs(prev => prev.filter(l => l.type !== 'progress'))
+        setActiveProgress(null)
         setIsDownloading(false)
         setStatus('done')
+        setOverallProgress(null)
         es.close()
         esRef.current = null
         return
       }
 
-      // Try to parse as a structured JSON message (e.g. progress)
+      // Try to parse as structured JSON (progress, overall_progress, etc.)
       try {
         const parsed = JSON.parse(raw)
+
+        // Per-file live progress
         if (parsed.type === 'progress') {
-          setLogs(prev => {
-            const next = [...prev]
-            const lastIdx = next.length - 1
-            // Update in-place if the last entry is already a progress line
-            if (lastIdx >= 0 && next[lastIdx].type === 'progress') {
-              next[lastIdx] = { ...next[lastIdx], percent: parsed.percent }
-            } else {
-              next.push({ text: '', type: 'progress', percent: parsed.percent })
-            }
-            return next
+          setActiveProgress({
+            percent: parsed.percent,
+            speedMbps: parsed.speed_mbps ?? 0,
+            etaSec: parsed.eta_sec ?? null,
+            sizeMb: parsed.size_mb ?? null,
           })
           return
         }
+
+        // Overall file counter (improvement B)
+        if (parsed.type === 'overall_progress') {
+          setOverallProgress({ current: parsed.current, total: parsed.total })
+          return
+        }
       } catch (_) {
-        // Not JSON – fall through to plain-text handling
+        // Not JSON — fall through to plain-text handling
       }
 
       const text = raw.replace(/\\n/g, '\n')
       const lines = text.split('\n')
+
+      for (const line of lines) {
+        const lower = line.toLowerCase()
+        if (lower.includes('downloading:')) {
+          // Instant 0ms progress bar initialization
+          setActiveProgress(prev => ({
+            percent: 0,
+            speedMbps: 0,
+            etaSec: null,
+            sizeMb: prev?.sizeMb ?? null,
+          }))
+        } else if (
+          line.includes('✓') ||
+          lower.includes('successfully downloaded') ||
+          lower.includes('skipping:') ||
+          lower.includes('download completed')
+        ) {
+          // File completed or skipped — remove active progress bar
+          setActiveProgress(null)
+        }
+      }
+
       setLogs(prev => [
         ...prev,
         ...lines.map(line => ({ text: line, type: classifyLine(line) }))
@@ -124,8 +162,10 @@ export function useDownload() {
     }
 
     es.onerror = () => {
+      setActiveProgress(null)
       setIsDownloading(false)
       setStatus('idle')
+      setOverallProgress(null)
       es.close()
       esRef.current = null
     }
@@ -134,6 +174,8 @@ export function useDownload() {
   const startDownload = useCallback(async () => {
     if (isDownloading) return
     setLogs([])
+    setActiveProgress(null)
+    setOverallProgress(null)
     setStatus('running')
     setIsDownloading(true)
 
@@ -145,7 +187,7 @@ export function useDownload() {
     const data = await res.json()
 
     if (!data.ok) {
-      setLogs([{ text: `[ERROR] ${data.error}`, type: 'error' }])
+      setLogs([{ text: `[ERROR] ${data.error ?? 'Unknown error — check your inputs and try again.'}`, type: 'error' }])
       setIsDownloading(false)
       setStatus('idle')
       return
@@ -155,10 +197,33 @@ export function useDownload() {
   }, [config, isDownloading])
 
   const cancelDownload = useCallback(async () => {
-    await fetch('/api/download/cancel', { method: 'POST' })
+    try {
+      const res = await fetch('/api/download/cancel', { method: 'POST' })
+      const data = await res.json()
+      if (data.ok) {
+        // Immediately reflect cancellation in the UI
+        setActiveProgress(null)
+        setIsDownloading(false)
+        setStatus('idle')
+        setOverallProgress(null)
+        setLogs(prev => [
+          ...prev,
+          { text: '[INFO] Download cancelled by user.', type: 'info' },
+        ])
+        if (esRef.current) {
+          esRef.current.close()
+          esRef.current = null
+        }
+      }
+    } catch (e) {
+      console.error('Cancel failed:', e)
+    }
   }, [])
 
-  const clearLogs = useCallback(() => setLogs([]), [])
+  const clearLogs = useCallback(() => {
+    setLogs([])
+    setActiveProgress(null)
+  }, [])
 
   const switchAccount = useCallback(async () => {
     const res = await fetch('/api/account/switch', {
@@ -181,7 +246,7 @@ export function useDownload() {
         { text: '═'.repeat(60), type: 'info' },
       ])
     } else {
-      setLogs(prev => [...prev, { text: `[ERROR] ${data.error}`, type: 'error' }])
+      setLogs(prev => [...prev, { text: `[ERROR] ${data.error ?? 'Failed to switch account'}`, type: 'error' }])
     }
   }, [config.token_file])
 
@@ -189,9 +254,11 @@ export function useDownload() {
     config,
     updateField,
     logs,
+    activeProgress,
     clearLogs,
     isDownloading,
     status,
+    overallProgress,
     startDownload,
     cancelDownload,
     switchAccount,

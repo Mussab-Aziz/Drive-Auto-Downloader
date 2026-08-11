@@ -8,22 +8,53 @@ import asyncio
 import json
 import queue
 import threading
-import subprocess
 import sys
+import webbrowser
 from pathlib import Path
 from typing import Optional
+from contextlib import asynccontextmanager
+import tkinter as tk
+from tkinter import filedialog
 
 import uvicorn
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+
+def get_base_path() -> Path:
+    """Return the base directory for data files.
+
+    When running as a PyInstaller bundle, sys._MEIPASS points to the
+    temporary directory where assets are unpacked.  During normal
+    development the base path is simply the directory that contains
+    this file.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parent
 
 from enhanced_downloader import GoogleDriveDownloader
 
 # ─── App Setup ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Drive Download Automation API", version="1.0.0")
+async def _open_browser_async():
+    """Wait briefly for uvicorn to be ready then open the browser."""
+    await asyncio.sleep(1)
+    webbrowser.open("http://127.0.0.1:8000")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan – opens the browser when running as a frozen app."""
+    if getattr(sys, "frozen", False):
+        asyncio.create_task(_open_browser_async())
+    yield
+
+
+app = FastAPI(title="Drive Download Automation API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,7 +64,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CONFIG_PATH = Path(".") / "ui_config.json"
+BASE_PATH = get_base_path()
+CONFIG_PATH = BASE_PATH / "ui_config.json"
+
+
 
 # ─── Global Download State ────────────────────────────────────────────────────
 
@@ -54,17 +88,20 @@ class DownloadState:
                 break
 
 state = DownloadState()
+# Lock that makes the is_downloading check-and-set in start_download atomic
+# so simultaneous API calls cannot both pass the guard and spawn two threads.
+_download_lock = threading.Lock()
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
 
 class Config(BaseModel):
     source_folder_id: str = ""
     destination_folder: str = ""
-    token_file: str = ""
     secret_file: str = ""
     skip_photos: bool = False
     skip_videos: bool = False
     skip_audio: bool = False
+    skip_google_files: bool = False
 
 class DownloadRequest(BaseModel):
     source_folder_id: str
@@ -73,6 +110,7 @@ class DownloadRequest(BaseModel):
     skip_photos: bool = False
     skip_videos: bool = False
     skip_audio: bool = False
+    skip_google_files: bool = False
 
 class BrowseRequest(BaseModel):
     title: str = "Select"
@@ -84,48 +122,145 @@ class SwitchAccountRequest(BaseModel):
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
 def extract_folder_id(folder_input: str) -> str:
-    """Extract folder ID from a Google Drive link or raw ID."""
+    """
+    Extract the Drive item ID from a Google Drive link or raw ID.
+
+    Supported formats:
+      - Folder link:  https://drive.google.com/drive/folders/FOLDER_ID[?...]
+      - File link:    https://drive.google.com/file/d/FILE_ID/view[?...]
+      - Raw ID:       any alphanumeric string longer than 10 characters
+    """
     folder_input = folder_input.strip()
     if "drive.google.com" in folder_input:
         try:
             if "/folders/" in folder_input:
-                folder_id = folder_input.split("/folders/")[1].split("?")[0].split("&")[0]
-                return folder_id.strip()
+                # Standard folder share link
+                drive_id = folder_input.split("/folders/")[1].split("?")[0].split("&")[0]
+                return drive_id.strip()
+            elif "/file/d/" in folder_input:
+                # Single-file share link — the downloader will handle the single-file case
+                drive_id = folder_input.split("/file/d/")[1].split("/")[0].split("?")[0]
+                return drive_id.strip()
             else:
-                raise ValueError("Could not find 'folders/' in the link")
+                raise ValueError(
+                    "Unrecognised Google Drive link. "
+                    "Please use a folder link (…/folders/ID) or a file link (…/file/d/ID)."
+                )
         except (IndexError, AttributeError):
-            raise ValueError("Invalid Google Drive folder link format")
+            raise ValueError("Invalid Google Drive link format")
     else:
         if len(folder_input) > 10:
             return folder_input
         else:
-            raise ValueError("Invalid folder ID format")
+            raise ValueError("Invalid ID — must be longer than 10 characters")
+
+
+# ─── Tkinter Dialog Manager ───────────────────────────────────────────────────
+# Tkinter MUST have its event loop on a single dedicated thread.
+# We spin up one daemon thread that owns tk.mainloop() and dispatches
+# all dialog calls through it via a queue + root.after().
+
+class _TkDialogManager:
+    """Singleton that owns the Tk event loop thread and services dialog requests."""
+
+    def __init__(self):
+        self._req_queue: queue.Queue = queue.Queue()
+        self._root: Optional[tk.Tk] = None
+        self._thread = threading.Thread(target=self._thread_main, daemon=True, name="TkDialogThread")
+        self._thread.start()
+        # Wait until Tk is ready
+        self._ready = threading.Event()
+        self._ready.wait(timeout=10)
+
+    def _thread_main(self):
+        self._root = tk.Tk()
+        self._root.withdraw()          # keep root window hidden
+        self._root.wm_attributes("-topmost", True)
+        self._ready.set()
+        self._root.after(50, self._poll)
+        self._root.mainloop()
+
+    def _poll(self):
+        """Called by Tk's event loop every 50 ms to process queued dialog calls."""
+        try:
+            while True:
+                fn, result_box = self._req_queue.get_nowait()
+                try:
+                    result_box["result"] = fn(self._root)
+                except Exception as exc:
+                    result_box["error"] = exc
+                finally:
+                    result_box["event"].set()
+        except queue.Empty:
+            pass
+        self._root.after(50, self._poll)
+
+    def _dispatch(self, fn) -> Optional[str]:
+        box = {"result": None, "error": None, "event": threading.Event()}
+        self._req_queue.put((fn, box))
+        box["event"].wait(timeout=300)          # 5-minute user timeout
+        if box["error"]:
+            raise box["error"]
+        return box["result"]
+
+    def ask_directory(self, title: str, initialdir: str) -> Optional[str]:
+        def _run(root):
+            root.wm_attributes("-topmost", True)
+            path = filedialog.askdirectory(
+                title=title, initialdir=initialdir, parent=root
+            )
+            root.wm_attributes("-topmost", False)
+            return path or None
+        return self._dispatch(_run)
+
+    def ask_open_filename(self, title: str, initialdir: str) -> Optional[str]:
+        def _run(root):
+            root.wm_attributes("-topmost", True)
+            path = filedialog.askopenfilename(
+                title=title,
+                initialdir=initialdir,
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                parent=root,
+            )
+            root.wm_attributes("-topmost", False)
+            return path or None
+        return self._dispatch(_run)
+
+
+_tk_manager: Optional["_TkDialogManager"] = None
+_tk_manager_lock = threading.Lock()
+
+
+def _get_tk_manager() -> "_TkDialogManager":
+    global _tk_manager
+    if _tk_manager is None:
+        with _tk_manager_lock:
+            if _tk_manager is None:
+                _tk_manager = _TkDialogManager()
+    return _tk_manager
+
 
 def open_folder_dialog(title: str, initial_dir: str) -> Optional[str]:
-    """Open a native folder picker dialog using a subprocess to avoid tkinter thread issues."""
+    """Show a native folder-picker dialog on the dedicated Tk thread."""
+    if not initial_dir or not Path(initial_dir).exists():
+        initial_dir = str(Path.home())
     try:
-        result = subprocess.check_output(
-            [sys.executable, "dialog_helper.py", "folder", title, initial_dir],
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        ).strip()
-        return result if result else None
-    except Exception as e:
-        print(f"Dialog error: {e}")
+        return _get_tk_manager().ask_directory(title, initial_dir)
+    except Exception as exc:
+        print(f"Folder dialog error: {exc}")
         return None
 
+
 def open_file_dialog(title: str, initial_dir: str) -> Optional[str]:
-    """Open a native file picker dialog using a subprocess to avoid tkinter thread issues."""
+    """Show a native file-picker dialog on the dedicated Tk thread."""
+    if not initial_dir or not Path(initial_dir).exists():
+        initial_dir = str(Path.home())
     try:
-        result = subprocess.check_output(
-            [sys.executable, "dialog_helper.py", "file", title, initial_dir],
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        ).strip()
-        return result if result else None
-    except Exception as e:
-        print(f"Dialog error: {e}")
+        return _get_tk_manager().ask_open_filename(title, initial_dir)
+    except Exception as exc:
+        print(f"File dialog error: {exc}")
         return None
+
 
 # ─── Config Endpoints ──────────────────────────────────────────────────────────
 
@@ -155,7 +290,7 @@ async def save_config(config: Config):
 @app.post("/api/browse/folder")
 async def browse_folder(req: BrowseRequest):
     """Open a native folder picker and return the selected path."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     path = await loop.run_in_executor(
         None, open_folder_dialog, req.title, req.initial_dir
     )
@@ -164,7 +299,7 @@ async def browse_folder(req: BrowseRequest):
 @app.post("/api/browse/file")
 async def browse_file(req: BrowseRequest):
     """Open a native file picker and return the selected path."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     path = await loop.run_in_executor(
         None, open_file_dialog, req.title, req.initial_dir
     )
@@ -178,7 +313,7 @@ async def switch_account():
     if state.is_downloading:
         return {"ok": False, "error": "Cannot switch account while downloading"}
     try:
-        token_path = Path("token.json")
+        token_path = BASE_PATH / "token.json"
         if token_path.exists():
             token_path.unlink()
         return {"ok": True}
@@ -193,6 +328,7 @@ def run_download_thread(
     secret_file: str,
     token_file: str,
     file_filters: dict,
+    skip_google_files: bool,
 ):
     """Runs the download in a background thread and feeds logs to the queue."""
     def log_cb(msg: str):
@@ -213,6 +349,7 @@ def run_download_thread(
             folder_id=folder_id,
             download_dir=dest_dir,
             file_filters=file_filters,
+            skip_google_files=skip_google_files,
         )
 
         if state.cancel_event.is_set():
@@ -231,31 +368,51 @@ def run_download_thread(
 @app.post("/api/download/start")
 async def start_download(req: DownloadRequest):
     """Start the download process in a background thread."""
-    if state.is_downloading:
-        return {"ok": False, "error": "Download already in progress"}
+    with _download_lock:
+        if state.is_downloading:
+            return {"ok": False, "error": "Download already in progress"}
+        # Reserve the slot immediately — prevents concurrent requests from
+        # both passing the guard before either thread has started.
+        state.is_downloading = True
 
-    # Validate & extract folder ID
+    # Validate inputs – reset the flag if any check fails
     try:
         if not req.source_folder_id.strip():
+            state.is_downloading = False
             return {"ok": False, "error": "Source Folder Link/ID is required"}
         folder_id = extract_folder_id(req.source_folder_id)
     except ValueError as e:
+        state.is_downloading = False
         return {"ok": False, "error": str(e)}
 
     dest_dir = req.destination_folder.strip()
     if not dest_dir:
+        state.is_downloading = False
         return {"ok": False, "error": "Destination Folder is required"}
+
+    # Verify the destination is writable before touching the Drive API (improvement E)
+    try:
+        _dest_path = Path(dest_dir)
+        _dest_path.mkdir(parents=True, exist_ok=True)
+        _probe = _dest_path / ".drive_write_test"
+        _probe.write_text("ok")
+        _probe.unlink()
+    except Exception as _exc:
+        state.is_downloading = False
+        return {"ok": False, "error": f"Destination folder is not writable: {_exc}"}
 
     secret_file = req.secret_file.strip()
     if not secret_file:
+        state.is_downloading = False
         return {"ok": False, "error": "Client Secret File is required"}
     if not Path(secret_file).exists():
+        state.is_downloading = False
         return {"ok": False, "error": f"Client Secret File not found at: {secret_file}"}
 
-    token_file = "token.json"
+    token_file = str(BASE_PATH / "token.json")
 
     state.reset()
-    state.is_downloading = True
+    # is_downloading is already True from the lock block above
 
     file_filters = {
         "photos": req.skip_photos,
@@ -271,6 +428,7 @@ async def start_download(req: DownloadRequest):
         skip_photos=req.skip_photos,
         skip_videos=req.skip_videos,
         skip_audio=req.skip_audio,
+        skip_google_files=req.skip_google_files,
     )
     try:
         with open(CONFIG_PATH, "w") as f:
@@ -281,7 +439,7 @@ async def start_download(req: DownloadRequest):
     # Start thread
     thread = threading.Thread(
         target=run_download_thread,
-        args=(folder_id, dest_dir, secret_file, token_file, file_filters),
+        args=(folder_id, dest_dir, secret_file, token_file, file_filters, req.skip_google_files),
         daemon=True,
     )
     thread.start()
@@ -304,8 +462,8 @@ async def stream_logs():
     async def event_generator():
         while True:
             try:
-                msg = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: state.log_queue.get(timeout=30)
+                msg = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: state.log_queue.get(timeout=60)  # 60 s keeps pings rare (improvement F)
                 )
                 if msg is None:
                     # Download finished – send a close signal and stop
@@ -315,7 +473,7 @@ async def stream_logs():
                 escaped = msg.replace("\n", "\\n")
                 yield f"data: {escaped}\n\n"
             except Exception:
-                # Timeout or cancelled
+                # Timeout heartbeat — keeps the connection alive
                 yield "data: __PING__\n\n"
 
     return StreamingResponse(
@@ -341,3 +499,12 @@ async def get_status():
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=False)
+
+
+# ─── Serve built React frontend (MUST be last so API routes take priority) ─────
+# Starlette checks routes in registration order. Mounting StaticFiles at "/"
+# before API routes would cause it to intercept all POST requests with 405.
+# By mounting here, all API routes registered above are checked first.
+_frontend_dist = BASE_PATH / "frontend_dist"
+if _frontend_dist.exists():
+    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="static")

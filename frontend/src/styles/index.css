@@ -324,25 +324,30 @@ body::before {
 
 /* ─── Toggles ────────────────────────────────────────────────── */
 .toggles-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+  width: 100%;
 }
 
 .toggle-label {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
+  gap: 6px;
   cursor: pointer;
   user-select: none;
-  padding: 8px 14px;
+  padding: 8px 6px;
   border-radius: var(--radius-sm);
   background: var(--bg-input);
   border: 1px solid var(--border);
   transition: all var(--trans-smooth);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-secondary);
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .toggle-label:hover {
@@ -359,9 +364,9 @@ body::before {
 
 /* The switch track */
 .toggle-track {
-  width: 36px;
-  height: 20px;
-  border-radius: 10px;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
   background: rgba(255,255,255,0.1);
   position: relative;
   transition: background var(--trans-smooth);
@@ -374,18 +379,18 @@ body::before {
 
 .toggle-thumb {
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 14px;
-  height: 14px;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: #fff;
   transition: transform var(--trans-smooth);
-  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
 }
 
 .toggle-track.on .toggle-thumb {
-  transform: translateX(16px);
+  transform: translateX(12px);
 }
 
 /* ─── Console / Log Area ─────────────────────────────────────── */
@@ -454,7 +459,11 @@ body::before {
   to   { opacity: 1; transform: translateX(0); }
 }
 
-.log-line.success { color: #4ade80; }
+.log-line.success {
+  color: #22c55e;
+  font-weight: 600;
+  text-shadow: 0 0 12px rgba(34, 197, 94, 0.25);
+}
 .log-line.error   { color: #f87171; }
 .log-line.warning { color: #fbbf24; }
 .log-line.info    { color: #60a5fa; }
@@ -466,42 +475,171 @@ body::before {
   font-style: italic;
 }
 
-/* ─── Inline download progress bar ──────────────────────────── */
-.log-progress-wrap {
+/* ─── Active Live Download Progress Bar ────────────────────────── */
+.active-progress-wrap {
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: rgba(14, 20, 32, 0.9);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 16px rgba(59, 130, 246, 0.08);
+  animation: logFadeIn 0.2s ease;
+  backdrop-filter: blur(8px);
+}
+
+.active-progress-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.active-progress-status {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 4px 0;
-}
-
-.log-progress-label {
-  color: #60a5fa;
-  font-size: 11.5px;
+  gap: 7px;
+  color: #94a3b8;
+  font-size: 11px;
   font-weight: 600;
-  white-space: nowrap;
-  min-width: 110px;
-  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
-.log-progress-track {
-  flex: 1;
+.active-progress-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #3b82f6;
+  box-shadow: 0 0 8px #3b82f6;
+  animation: dotPulse 1.2s ease-in-out infinite;
+}
+
+.active-progress-pct {
+  color: #60a5fa;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+}
+
+.active-progress-track {
+  width: 100%;
   height: 6px;
   border-radius: 3px;
-  background: rgba(255,255,255,0.07);
+  background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
   position: relative;
+  margin-bottom: 8px;
 }
 
-.log-progress-fill {
-  display: block;
+.active-progress-fill {
   height: 100%;
   border-radius: 3px;
   background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%);
-  transition: width 0.25s ease;
+  transition: width 0.15s ease;
   position: relative;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.4);
 }
 
-/* Shimmer sweep on the fill */
+.active-progress-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.35) 50%,
+    transparent 100%
+  );
+  animation: progressShimmer 1.4s linear infinite;
+}
+
+.active-progress-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+}
+
+.active-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.active-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.active-meta-speed {
+  color: #38bdf8;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+}
+
+.active-meta-speed.dim {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.active-meta-eta {
+  color: #fbbf24;
+  font-weight: 500;
+}
+
+.active-meta-size {
+  color: #cbd5e1;
+  font-weight: 500;
+}
+
+/* ─── Overall progress bar (improvement B) ──────────────────── */
+.overall-progress-wrap {
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  background: rgba(59,130,246,0.06);
+  border: 1px solid rgba(59,130,246,0.18);
+  border-radius: var(--radius-sm);
+  animation: logFadeIn 0.3s ease;
+}
+
+.overall-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.overall-progress-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #60a5fa;
+  letter-spacing: 0.02em;
+}
+
+.overall-progress-pct {
+  font-size: 11px;
+  font-weight: 700;
+  color: #60a5fa;
+  opacity: 0.8;
+}
+
+.overall-progress-track {
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.07);
+  overflow: hidden;
+}
+
+.overall-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%);
+  transition: width 0.5s ease;
+}
+
+/* ─── Shimmer sweep on progress fill ─────────────────────────── */
 .log-progress-fill::after {
   content: '';
   position: absolute;

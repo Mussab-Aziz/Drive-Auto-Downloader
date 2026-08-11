@@ -21,7 +21,7 @@ function Toggle({ id, label, emoji, checked, onChange, disabled }) {
   )
 }
 
-export default function FiltersCard({ skipPhotos, skipVideos, skipAudio, onChange, disabled }) {
+export default function FiltersCard({ skipPhotos, skipVideos, skipAudio, skipGoogleFiles, onChange, disabled }) {
   return (
     <div className="card">
       <div className="card-title">
@@ -62,6 +62,14 @@ export default function FiltersCard({ skipPhotos, skipVideos, skipAudio, onChang
           emoji="🎵"
           checked={skipAudio}
           onChange={v => onChange('skip_audio', v)}
+          disabled={disabled}
+        />
+        <Toggle
+          id="toggle-skip-google"
+          label="Skip Workspace"
+          emoji="📝"
+          checked={skipGoogleFiles}
+          onChange={v => onChange('skip_google_files', v)}
           disabled={disabled}
         />
       </div>
