@@ -88,14 +88,29 @@ class GoogleDriveDownloader:
             print(message)
 
     def authenticate(self) -> Credentials:
-        """Authenticate with Google Drive API."""
+        """Authenticate with Google Drive API with retry on token refresh network errors."""
         creds = None
         if os.path.exists(self.token_file):
             creds = Credentials.from_authorized_user_file(self.token_file, SCOPES)
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
+                attempt = 0
+                while True:
+                    if self.cancel_event and self.cancel_event.is_set():
+                        raise Exception("Operation cancelled by user.")
+                    try:
+                        creds.refresh(Request())
+                        break
+                    except Exception as e:
+                        attempt += 1
+                        wait_sec = min(5 * (2 ** (attempt - 1)), 60)
+                        self.log(f"[!] Network error refreshing credentials ({e}).")
+                        self.log(f"[!] Retrying token refresh in {wait_sec}s… (press Stop to cancel)")
+                        for _ in range(wait_sec):
+                            if self.cancel_event and self.cancel_event.is_set():
+                                raise Exception("Operation cancelled by user.")
+                            time.sleep(1)
             else:
                 self.log("\n" + "=" * 70)
                 self.log("AUTHENTICATION REQUIRED")
@@ -148,10 +163,25 @@ class GoogleDriveDownloader:
         return True
 
     def build_service(self):
-        """Build the Google Drive service."""
+        """Build the Google Drive service with network retry resilience."""
         if self.service is None:
-            creds = self.authenticate()
-            self.service = build('drive', 'v3', credentials=creds)
+            attempt = 0
+            while True:
+                if self.cancel_event and self.cancel_event.is_set():
+                    raise Exception("Operation cancelled by user.")
+                try:
+                    creds = self.authenticate()
+                    self.service = build('drive', 'v3', credentials=creds)
+                    break
+                except Exception as e:
+                    attempt += 1
+                    wait_sec = min(5 * (2 ** (attempt - 1)), 60)
+                    self.log(f"[!] Network error building Google Drive service: {e}")
+                    self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
+                    for _ in range(wait_sec):
+                        if self.cancel_event and self.cancel_event.is_set():
+                            raise Exception("Operation cancelled by user.")
+                        time.sleep(1)
         return self.service
 
     def verify_folder_access(self, folder_id: str):
@@ -167,38 +197,50 @@ class GoogleDriveDownloader:
 
     def get_item_info(self, item_id: str) -> dict:
         """
-        Fetch metadata for any Drive item (file or folder) and verify access.
-
-        Returns:
-            Dict with 'id', 'name', 'mimeType', 'size'.
-
-        Raises:
-            Exception with a descriptive message on HTTP errors.
+        Fetch metadata for any Drive item (file or folder) with infinite retry resilience.
         """
-        try:
-            return self.service.files().get(
-                fileId=item_id,
-                fields="id, name, mimeType, size"
-            ).execute()
-        except HttpError as e:
-            error_code = e.resp.status if e.resp else 500
-            if error_code == 404:
-                raise Exception(
-                    f"❌ Item not found (HTTP 404). The ID '{item_id}' does not exist, "
-                    "may have been deleted, or you have no access to it."
-                )
-            elif error_code == 403:
-                raise Exception(
-                    "❌ Access denied (HTTP 403). You don't have permission to access this item. "
-                    "Please verify it is shared with your Google account."
-                )
-            elif error_code == 401:
-                raise Exception(
-                    "❌ Authentication failed (HTTP 401). Your credentials may have expired. "
-                    "Please delete token.json and try again."
-                )
-            else:
-                raise Exception(f"❌ Google Drive API error (HTTP {error_code}): {str(e)}")
+        attempt = 0
+        while True:
+            if self.cancel_event and self.cancel_event.is_set():
+                raise Exception("Operation cancelled by user.")
+            try:
+                return self.service.files().get(
+                    fileId=item_id,
+                    fields="id, name, mimeType, size"
+                ).execute()
+            except HttpError as e:
+                error_code = e.resp.status if e.resp else 500
+                if error_code == 404:
+                    raise Exception(
+                        f"❌ Item not found (HTTP 404). The ID '{item_id}' does not exist, "
+                        "may have been deleted, or you have no access to it."
+                    )
+                elif error_code == 403:
+                    raise Exception(
+                        "❌ Access denied (HTTP 403). You don't have permission to access this item. "
+                        "Please verify it is shared with your Google account."
+                    )
+                elif error_code == 401:
+                    self.log("[!] Access token expired while fetching item info. Refreshing...")
+                    self.creds.refresh(Request())
+                    self.session = AuthorizedSession(self.creds)
+                    continue
+                else:
+                    attempt += 1
+                    wait_sec = min(5 * (2 ** (attempt - 1)), 60)
+                    self.log(f"[!] Google Drive API error (HTTP {error_code}): {e}")
+                    self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
+            except Exception as e:
+                # Catch WinError 10060, ConnectionError, timeout, etc.
+                attempt += 1
+                wait_sec = min(5 * (2 ** (attempt - 1)), 60)
+                self.log(f"[!] Connection error fetching item info ({e}).")
+                self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
+
+            for _ in range(wait_sec):
+                if self.cancel_event and self.cancel_event.is_set():
+                    raise Exception("Operation cancelled by user.")
+                time.sleep(1)
 
     def should_filter_file(self, mime_type: str, file_filters: dict) -> bool:
         """
@@ -221,29 +263,18 @@ class GoogleDriveDownloader:
 
     def get_all_files_recursive(self, folder_id: str, prefix: str = '') -> list:
         """
-        Recursively get all files from a folder and its subfolders.
-
-        Logs each subfolder name as it is entered so the user can see scan
-        progress in real time (improvement A).
-
-        Retries on HTTP 429 rate-limit errors with a 60-second back-off per
-        attempt to respect Drive API quotas (improvement D).
-
-        Args:
-            folder_id: The Google Drive folder ID
-            prefix: Path prefix for building the relative path
-
-        Returns:
-            List of tuples: (file_id, file_name, mime_type, relative_path, file_size)
+        Recursively get all files from a folder and its subfolders with full network outage resilience.
         """
         items = []
         page_token = None
         query = f"'{folder_id}' in parents and trashed=false"
 
         while True:
-            # ── API call with 429 back-off ────────────────────────────────
+            # ── API call with infinite network retry loop ─────────────────
             api_attempt = 0
             while True:
+                if self.cancel_event and self.cancel_event.is_set():
+                    return items
                 try:
                     results = self.service.files().list(
                         q=query,
@@ -255,42 +286,60 @@ class GoogleDriveDownloader:
 
                 except HttpError as e:
                     error_code = e.resp.status if e.resp else 500
-                    if error_code == 429:
-                        api_attempt += 1
-                        wait_sec = min(60 * api_attempt, 300)
-                        self.log(
-                            f"[!] Rate limit hit (HTTP 429) during folder scan. "
-                            f"Waiting {wait_sec}s before retry {api_attempt}…"
-                        )
-                        for _ in range(wait_sec):
-                            if self.cancel_event and self.cancel_event.is_set():
-                                return items
-                            time.sleep(1)
-                        continue  # retry the API call
-                    elif error_code == 403:
+                    if error_code == 403:
                         raise Exception(
                             "❌ Access denied while accessing folder. "
                             "You may not have permission to this subfolder."
                         )
                     elif error_code == 404:
                         raise Exception("❌ A folder in the path was not found or deleted.")
+                    elif error_code == 401:
+                        self.log("[!] Access token expired during folder scan. Refreshing...")
+                        self.creds.refresh(Request())
+                        self.session = AuthorizedSession(self.creds)
+                        continue
+                    elif error_code == 429:
+                        api_attempt += 1
+                        wait_sec = min(60 * api_attempt, 300)
+                        self.log(
+                            f"[!] Rate limit hit (HTTP 429) during folder scan. "
+                            f"Waiting {wait_sec}s before retry {api_attempt}… (press Stop to cancel)"
+                        )
                     else:
-                        raise Exception(f"❌ Google Drive API error: {str(e)}")
+                        api_attempt += 1
+                        wait_sec = min(10 * (2 ** (api_attempt - 1)), 120)
+                        self.log(
+                            f"[!] Google Drive API error (HTTP {error_code}) during scan: {e}. "
+                            f"Retrying in {wait_sec}s… (press Stop to cancel)"
+                        )
+
+                except Exception as e:
+                    # Catch WinError 10060, ConnectionResetError, TimeoutError, etc.
+                    api_attempt += 1
+                    wait_sec = min(10 * (2 ** (api_attempt - 1)), 120)
+                    self.log(
+                        f"[!] Network/connection error during folder scan: {e}. "
+                        f"Retrying in {wait_sec}s… (press Stop to cancel)"
+                    )
+
+                for _ in range(wait_sec):
+                    if self.cancel_event and self.cancel_event.is_set():
+                        return items
+                    time.sleep(1)
 
             # ── Process page results ──────────────────────────────────────
             files = results.get('files', [])
             for file_info in files:
-                # Strip whitespace from names to avoid invalid paths
                 file_name = file_info['name'].strip()
                 relative_path = f"{prefix}/{file_name}" if prefix else file_name
                 file_size = int(file_info.get('size', 0) or 0)
 
                 if file_info['mimeType'] == 'application/vnd.google-apps.folder':
-                    # Log folder entry so the user sees scanning progress (improvement A)
                     self.log(f"  📁 Scanning: {relative_path}/")
-                    items.extend(
-                        self.get_all_files_recursive(file_info['id'], relative_path)
-                    )
+                    sub_items = self.get_all_files_recursive(file_info['id'], relative_path)
+                    if self.cancel_event and self.cancel_event.is_set():
+                        return items
+                    items.extend(sub_items)
                 else:
                     items.append(
                         (
@@ -359,13 +408,13 @@ class GoogleDriveDownloader:
                     "size_mb": initial_size_mb,
                 }))
 
-                with session.get(url, stream=True, timeout=30) as response:
+                with session.get(url, stream=True, timeout=45) as response:
                     if response.status_code == 429:
                         attempt += 1
-                        wait_sec = min(10 * (2 ** (attempt - 1)), 600)
+                        wait_sec = min(10 * (2 ** (attempt - 1)), 300)
                         self.log(
                             f"[!] Rate limit hit (HTTP 429) on attempt {attempt}. "
-                            f"Waiting {wait_sec}s… (press Cancel to stop)"
+                            f"Waiting {wait_sec}s… (press Stop to cancel)"
                         )
                         for _ in range(wait_sec):
                             if self.cancel_event and self.cancel_event.is_set():
@@ -373,10 +422,18 @@ class GoogleDriveDownloader:
                             time.sleep(1)
                         continue
 
+                    if response.status_code == 401:
+                        self.log("[!] Access token expired during download. Refreshing credentials...")
+                        self.creds.refresh(Request())
+                        self.session = AuthorizedSession(self.creds)
+                        continue
+
                     if response.status_code == 404:
-                        raise Exception("❌ File not found or deleted on Google Drive (HTTP 404)")
+                        self.log(f"[!] ❌ File '{label}' not found or deleted on Google Drive (HTTP 404). Skipping.")
+                        return False
                     if response.status_code == 403:
-                        raise Exception("❌ Access denied (HTTP 403) — check sharing permissions")
+                        self.log(f"[!] ❌ Access denied for file '{label}' (HTTP 403). Check sharing permissions. Skipping.")
+                        return False
                     if response.status_code != 200:
                         response.raise_for_status()
 
@@ -430,9 +487,9 @@ class GoogleDriveDownloader:
 
             except Exception as e:
                 attempt += 1
-                wait_sec = min(10 * (2 ** (attempt - 1)), 600)
-                self.log(f"[!] Error on attempt {attempt}: {e}")
-                self.log(f"[!] Retrying in {wait_sec}s… (press Cancel to stop)")
+                wait_sec = min(10 * (2 ** (attempt - 1)), 300)
+                self.log(f"[!] Network/connection error downloading '{label}' (attempt {attempt}): {e}")
+                self.log(f"[!] Retrying download in {wait_sec}s… (press Stop to cancel)")
 
             finally:
                 if not success:
@@ -571,10 +628,12 @@ class GoogleDriveDownloader:
             self.log(f"{'=' * 60}")
 
         except HttpError as e:
-            error_code = e.resp.status if e.resp else 500
-            self.log(f"\n[ERROR] Google Drive API Error (HTTP {error_code})")
+            if not (self.cancel_event and self.cancel_event.is_set()):
+                error_code = e.resp.status if e.resp else 500
+                self.log(f"\n[ERROR] Google Drive API Error (HTTP {error_code})")
             raise
 
         except Exception as e:
-            self.log(f"\n{str(e)}")
+            if not (self.cancel_event and self.cancel_event.is_set()):
+                self.log(f"\n{str(e)}")
             raise
