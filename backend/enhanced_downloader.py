@@ -51,6 +51,22 @@ FILE_TYPE_FILTERS = {
 }
 
 
+def format_network_error(e: Exception) -> str:
+    """Convert raw urllib3 / socket / OS exceptions into clean, human-readable messages."""
+    err_str = str(e)
+    if "getaddrinfo failed" in err_str or "NameResolutionError" in err_str:
+        return "No internet connection (DNS lookup failed)"
+    if "Read timed out" in err_str or "WinError 10060" in err_str or "timed out" in err_str.lower():
+        return "Connection timed out"
+    if "ConnectionResetError" in err_str or "10054" in err_str or "10053" in err_str:
+        return "Connection reset by host or network"
+    if "Connection refused" in err_str or "10061" in err_str:
+        return "Connection refused"
+    if "Max retries exceeded" in err_str:
+        return "Network connection unavailable"
+    return err_str
+
+
 
 
 class GoogleDriveDownloader:
@@ -105,7 +121,8 @@ class GoogleDriveDownloader:
                     except Exception as e:
                         attempt += 1
                         wait_sec = min(5 * (2 ** (attempt - 1)), 60)
-                        self.log(f"[!] Network error refreshing credentials ({e}).")
+                        clean_err = format_network_error(e)
+                        self.log(f"[!] Network error refreshing credentials ({clean_err}).")
                         self.log(f"[!] Retrying token refresh in {wait_sec}s… (press Stop to cancel)")
                         for _ in range(wait_sec):
                             if self.cancel_event and self.cancel_event.is_set():
@@ -176,7 +193,8 @@ class GoogleDriveDownloader:
                 except Exception as e:
                     attempt += 1
                     wait_sec = min(5 * (2 ** (attempt - 1)), 60)
-                    self.log(f"[!] Network error building Google Drive service: {e}")
+                    clean_err = format_network_error(e)
+                    self.log(f"[!] Network error building Google Drive service ({clean_err}).")
                     self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
                     for _ in range(wait_sec):
                         if self.cancel_event and self.cancel_event.is_set():
@@ -234,7 +252,8 @@ class GoogleDriveDownloader:
                 # Catch WinError 10060, ConnectionError, timeout, etc.
                 attempt += 1
                 wait_sec = min(5 * (2 ** (attempt - 1)), 60)
-                self.log(f"[!] Connection error fetching item info ({e}).")
+                clean_err = format_network_error(e)
+                self.log(f"[!] Connection error fetching item info ({clean_err}).")
                 self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
 
             for _ in range(wait_sec):
@@ -317,8 +336,9 @@ class GoogleDriveDownloader:
                     # Catch WinError 10060, ConnectionResetError, TimeoutError, etc.
                     api_attempt += 1
                     wait_sec = min(10 * (2 ** (api_attempt - 1)), 120)
+                    clean_err = format_network_error(e)
                     self.log(
-                        f"[!] Network/connection error during folder scan: {e}. "
+                        f"[!] Network error during folder scan (attempt {api_attempt}): {clean_err}. "
                         f"Retrying in {wait_sec}s… (press Stop to cancel)"
                     )
 
@@ -488,8 +508,9 @@ class GoogleDriveDownloader:
             except Exception as e:
                 attempt += 1
                 wait_sec = min(10 * (2 ** (attempt - 1)), 300)
-                self.log(f"[!] Network/connection error downloading '{label}' (attempt {attempt}): {e}")
-                self.log(f"[!] Retrying download in {wait_sec}s… (press Stop to cancel)")
+                clean_err = format_network_error(e)
+                self.log(f"[!] Network error downloading '{label}' (attempt {attempt}): {clean_err}")
+                self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
 
             finally:
                 if not success:
