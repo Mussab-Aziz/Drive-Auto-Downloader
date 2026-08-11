@@ -120,10 +120,10 @@ class GoogleDriveDownloader:
                         break
                     except Exception as e:
                         attempt += 1
-                        wait_sec = min(5 * (2 ** (attempt - 1)), 60)
+                        wait_sec = 10
                         clean_err = format_network_error(e)
                         self.log(f"[!] Network error refreshing credentials ({clean_err}).")
-                        self.log(f"[!] Retrying token refresh in {wait_sec}s… (press Stop to cancel)")
+                        self.log(f"[!] Retrying token refresh in 10s… (press Stop to cancel)")
                         for _ in range(wait_sec):
                             if self.cancel_event and self.cancel_event.is_set():
                                 raise Exception("Operation cancelled by user.")
@@ -192,10 +192,10 @@ class GoogleDriveDownloader:
                     break
                 except Exception as e:
                     attempt += 1
-                    wait_sec = min(5 * (2 ** (attempt - 1)), 60)
+                    wait_sec = 10
                     clean_err = format_network_error(e)
                     self.log(f"[!] Network error building Google Drive service ({clean_err}).")
-                    self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
+                    self.log(f"[!] Retrying in 10s… (press Stop to cancel)")
                     for _ in range(wait_sec):
                         if self.cancel_event and self.cancel_event.is_set():
                             raise Exception("Operation cancelled by user.")
@@ -245,16 +245,16 @@ class GoogleDriveDownloader:
                     continue
                 else:
                     attempt += 1
-                    wait_sec = min(5 * (2 ** (attempt - 1)), 60)
+                    wait_sec = 10
                     self.log(f"[!] Google Drive API error (HTTP {error_code}): {e}")
-                    self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
+                    self.log(f"[!] Retrying in 10s… (press Stop to cancel)")
             except Exception as e:
                 # Catch WinError 10060, ConnectionError, timeout, etc.
                 attempt += 1
-                wait_sec = min(5 * (2 ** (attempt - 1)), 60)
+                wait_sec = 10
                 clean_err = format_network_error(e)
                 self.log(f"[!] Connection error fetching item info ({clean_err}).")
-                self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
+                self.log(f"[!] Retrying in 10s… (press Stop to cancel)")
 
             for _ in range(wait_sec):
                 if self.cancel_event and self.cancel_event.is_set():
@@ -319,27 +319,27 @@ class GoogleDriveDownloader:
                         continue
                     elif error_code == 429:
                         api_attempt += 1
-                        wait_sec = min(60 * api_attempt, 300)
+                        wait_sec = 10
                         self.log(
-                            f"[!] Rate limit hit (HTTP 429) during folder scan. "
-                            f"Waiting {wait_sec}s before retry {api_attempt}… (press Stop to cancel)"
+                            f"[!] Rate limit hit (HTTP 429) during folder scan (attempt {api_attempt}). "
+                            f"Waiting 10s… (press Stop to cancel)"
                         )
                     else:
                         api_attempt += 1
-                        wait_sec = min(10 * (2 ** (api_attempt - 1)), 120)
+                        wait_sec = 10
                         self.log(
                             f"[!] Google Drive API error (HTTP {error_code}) during scan: {e}. "
-                            f"Retrying in {wait_sec}s… (press Stop to cancel)"
+                            f"Retrying in 10s… (press Stop to cancel)"
                         )
 
                 except Exception as e:
                     # Catch WinError 10060, ConnectionResetError, TimeoutError, etc.
                     api_attempt += 1
-                    wait_sec = min(10 * (2 ** (api_attempt - 1)), 120)
+                    wait_sec = 10
                     clean_err = format_network_error(e)
                     self.log(
                         f"[!] Network error during folder scan (attempt {api_attempt}): {clean_err}. "
-                        f"Retrying in {wait_sec}s… (press Stop to cancel)"
+                        f"Retrying in 10s… (press Stop to cancel)"
                     )
 
                 for _ in range(wait_sec):
@@ -390,8 +390,8 @@ class GoogleDriveDownloader:
         - 64 KB streaming chunks written continuously straight to disk.
         - Real-time live speed and ETA updates emitted every 80ms (~12 updates per second).
         - Immediate 0% progress tick with known file size upfront (0ms delay).
-        - Retries indefinitely with exponential back-off on network failures.
-        - HTTP 429 rate limits logged with specific back-off message.
+        - Retries indefinitely every 10 seconds on network failures.
+        - HTTP 429 rate limits logged with clean 10s wait message.
         - Instant cancellation response.
 
         Args:
@@ -431,10 +431,10 @@ class GoogleDriveDownloader:
                 with session.get(url, stream=True, timeout=45) as response:
                     if response.status_code == 429:
                         attempt += 1
-                        wait_sec = min(10 * (2 ** (attempt - 1)), 300)
+                        wait_sec = 10
                         self.log(
                             f"[!] Rate limit hit (HTTP 429) on attempt {attempt}. "
-                            f"Waiting {wait_sec}s… (press Stop to cancel)"
+                            f"Waiting 10s… (press Stop to cancel)"
                         )
                         for _ in range(wait_sec):
                             if self.cancel_event and self.cancel_event.is_set():
@@ -507,10 +507,10 @@ class GoogleDriveDownloader:
 
             except Exception as e:
                 attempt += 1
-                wait_sec = min(10 * (2 ** (attempt - 1)), 300)
+                wait_sec = 10
                 clean_err = format_network_error(e)
                 self.log(f"[!] Network error downloading '{label}' (attempt {attempt}): {clean_err}")
-                self.log(f"[!] Retrying in {wait_sec}s… (press Stop to cancel)")
+                self.log(f"[!] Retrying in 10s… (press Stop to cancel)")
 
             finally:
                 if not success:
