@@ -691,10 +691,31 @@ class GoogleDriveDownloader:
             download_path.mkdir(parents=True, exist_ok=True)
 
             total = len(items)
-            self.log(f"Found {total} total items. Starting download…")
+
+            # ── Pre-scan: count already-finished files so the progress bar
+            # shows "File 1 of 35" on a resume, not "File 1 of 135" ────────
+            already_done = 0
+            for _, _, _mime, _rel, _ in items:
+                if 'vnd.google-apps' in _mime:
+                    continue  # these are never downloaded as binary files
+                _fp = download_path / _rel
+                if _fp.exists():
+                    already_done += 1
+
+            remaining_count = total - already_done
+
+            if already_done > 0:
+                self.log(
+                    f"Found {total} total items — "
+                    f"{already_done} already downloaded, "
+                    f"{remaining_count} remaining. Starting download…"
+                )
+            else:
+                self.log(f"Found {total} total items. Starting download…")
+
             self.downloaded_count = 0
             self.skipped_count = 0
-            # Counts files/exports actually attempted — drives the overall progress bar
+            # Counts only files actually attempted this session (not pre-existing ones)
             file_index = 0
 
             for file_id, file_name, mime_type, relative_path, file_size in items:
@@ -726,11 +747,12 @@ class GoogleDriveDownloader:
                     continue
 
                 file_index += 1
-                # Overall progress event (improvement B)
+                # Report progress against remaining_count (files still needed this session)
+                # so on a resume the bar correctly shows "1 of 35" not "1 of 135".
                 self.log(json.dumps({
                     "type": "overall_progress",
                     "current": file_index,
-                    "total": total,
+                    "total": remaining_count,
                 }))
 
                 # Show resume message if we have a partial download already
