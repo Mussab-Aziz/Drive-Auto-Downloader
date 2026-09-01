@@ -407,28 +407,45 @@ class GoogleDriveDownloader:
         initial_size_mb = round(known_size / (1024 * 1024), 1) if known_size else None
         url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
 
+        # Use a .part sidecar file so partial data is never mixed with complete files.
+        # On each retry the offset is read from the part file's current size so we
+        # resume exactly where the connection dropped — no re-downloading from byte 0.
+        part_path = file_path.with_suffix(file_path.suffix + '.part')
+        total_bytes = known_size or 0  # updated on first successful response
+        size_mb = initial_size_mb
+
         while True:
             if self.cancel_event and self.cancel_event.is_set():
                 return False
 
+            # How many bytes we already have on disk from a previous attempt
+            bytes_done = part_path.stat().st_size if part_path.exists() else 0
+
             success = False
             start_time = time.time()
             last_emit_time = 0
-            samples = []  # [(timestamp, bytes_downloaded)]
+            samples = []  # [(timestamp, cumulative_bytes_done)]
 
             try:
                 session = self.get_session()
 
-                # Emit 0% progress immediately with known file size (0ms latency)
+                # Always emit current progress so the bar shows immediately
+                progress_percent = int((bytes_done / total_bytes) * 100) if total_bytes > 0 else 0
                 self.log(json.dumps({
                     "type": "progress",
-                    "percent": 0,
+                    "percent": progress_percent,
                     "speed_mbps": 0,
                     "eta_sec": None,
-                    "size_mb": initial_size_mb,
+                    "size_mb": size_mb,
                 }))
 
-                with session.get(url, stream=True, timeout=45) as response:
+                # Send Range header if we already have some bytes
+                headers = {}
+                if bytes_done > 0:
+                    headers["Range"] = f"bytes={bytes_done}-"
+                    self.log(f"[~] Resuming '{label}' from {round(bytes_done / (1024 * 1024), 1)} MB…")
+
+                with session.get(url, stream=True, timeout=45, headers=headers) as response:
                     if response.status_code == 429:
                         attempt += 1
                         wait_sec = 10
@@ -450,23 +467,54 @@ class GoogleDriveDownloader:
 
                     if response.status_code == 404:
                         self.log(f"[!] ❌ File '{label}' not found or deleted on Google Drive (HTTP 404). Skipping.")
+                        part_path.unlink(missing_ok=True)
                         return False
                     if response.status_code == 403:
                         self.log(f"[!] ❌ Access denied for file '{label}' (HTTP 403). Check sharing permissions. Skipping.")
+                        part_path.unlink(missing_ok=True)
                         return False
-                    if response.status_code != 200:
+
+                    # 206 = partial content (Range accepted), 200 = full response
+                    if response.status_code == 416:
+                        # 416 Range Not Satisfiable — server says offset is past EOF,
+                        # meaning we already have the complete file. Rename and finish.
+                        self.log(f"[~] '{label}' appears already complete (HTTP 416). Finalising…")
+                        part_path.rename(file_path)
+                        return True
+
+                    if response.status_code not in (200, 206):
                         response.raise_for_status()
 
-                    total_bytes = int(response.headers.get('Content-Length', 0) or known_size or 0)
-                    size_mb = round(total_bytes / (1024 * 1024), 1) if total_bytes else initial_size_mb
-                    bytes_done = 0
+                    # If the server returned 200 (doesn't support Range), restart from 0
+                    if response.status_code == 200 and bytes_done > 0:
+                        self.log(f"[~] Server doesn't support resume for '{label}'. Restarting from 0…")
+                        bytes_done = 0
+                        part_path.unlink(missing_ok=True)
 
-                    with open(file_path, 'wb') as fh:
+                    # Update total size from Content-Length / Content-Range header
+                    content_length = int(response.headers.get('Content-Length', 0) or 0)
+                    if response.status_code == 206:
+                        # Content-Range: bytes start-end/total
+                        cr = response.headers.get('Content-Range', '')
+                        try:
+                            total_bytes = int(cr.split('/')[-1])
+                        except (ValueError, IndexError):
+                            total_bytes = bytes_done + content_length
+                    elif content_length:
+                        total_bytes = content_length
+                    elif known_size:
+                        total_bytes = known_size
+
+                    size_mb = round(total_bytes / (1024 * 1024), 1) if total_bytes else initial_size_mb
+
+                    # Open in append mode so we add bytes to what's already on disk
+                    write_mode = 'ab' if bytes_done > 0 else 'wb'
+                    with open(part_path, write_mode) as fh:
                         for chunk in response.iter_content(chunk_size=64 * 1024):
                             if self.cancel_event and self.cancel_event.is_set():
                                 self.log(f"[INFO] {label} cancelled.")
-                                fh.close()
-                                file_path.unlink(missing_ok=True)
+                                fh.flush()
+                                # Keep the .part file so the next run can resume
                                 return False
 
                             if chunk:
@@ -474,7 +522,7 @@ class GoogleDriveDownloader:
                                 bytes_done += len(chunk)
                                 now = time.time()
 
-                                # Emit updates every 80ms (~12 updates per second) for ultra-smooth UI
+                                # Emit progress updates every 80ms (~12 FPS)
                                 if now - last_emit_time >= 0.08 or (total_bytes > 0 and bytes_done >= total_bytes):
                                     last_emit_time = now
                                     samples.append((now, bytes_done))
@@ -502,6 +550,8 @@ class GoogleDriveDownloader:
                                         "size_mb": size_mb,
                                     }))
 
+                # Rename .part → final filename only on full success
+                part_path.rename(file_path)
                 success = True
                 return True
 
@@ -509,12 +559,12 @@ class GoogleDriveDownloader:
                 attempt += 1
                 wait_sec = 10
                 clean_err = format_network_error(e)
-                self.log(f"[!] Network error downloading '{label}' (attempt {attempt}): {clean_err}")
-                self.log(f"[!] Retrying in 10s… (press Stop to cancel)")
-
-            finally:
-                if not success:
-                    file_path.unlink(missing_ok=True)
+                # Tell the user exactly how many MB were saved so they know work isn't lost
+                saved_mb = round(part_path.stat().st_size / (1024 * 1024), 1) if part_path.exists() else 0
+                self.log(
+                    f"[!] Connection dropped downloading '{label}' (attempt {attempt}): {clean_err}. "
+                    f"{saved_mb} MB saved — will resume in 10s. (press Stop to cancel)"
+                )
 
             # Sleep in 1-second ticks so Cancel is always responsive
             for _ in range(wait_sec):
@@ -620,8 +670,9 @@ class GoogleDriveDownloader:
                     continue
 
                 file_path = download_path / relative_path
+                part_path = file_path.with_suffix(file_path.suffix + '.part')
 
-                # ── Already downloaded ───────────────────────────────────
+                # ── Already downloaded (complete file) ───────────────────
                 if file_path.exists():
                     self.log(f"Skipping: '{relative_path}' (Already exists)")
                     self.skipped_count += 1
@@ -634,7 +685,13 @@ class GoogleDriveDownloader:
                     "current": file_index,
                     "total": total,
                 }))
-                self.log(f"\nDownloading: {relative_path}")
+
+                # Show resume message if we have a partial download already
+                if part_path.exists():
+                    saved_mb = round(part_path.stat().st_size / (1024 * 1024), 1)
+                    self.log(f"\nResuming: {relative_path} ({saved_mb} MB already downloaded)")
+                else:
+                    self.log(f"\nDownloading: {relative_path}")
 
                 if self.download_file(file_id, file_path, file_size):
                     self.log(f"✓ Successfully downloaded: {relative_path}")
