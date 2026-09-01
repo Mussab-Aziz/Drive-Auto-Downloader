@@ -122,11 +122,14 @@ export function useDownload() {
           return
         }
 
-        // Overall file counter (improvement B)
+        // Overall file counter
         if (parsed.type === 'overall_progress') {
           setOverallProgress({ current: parsed.current, total: parsed.total })
           return
         }
+
+        // It was valid JSON but of another type — don't dump raw JSON to console logs
+        return
       } catch (_) {
         // Not JSON — fall through to plain-text handling
       }
