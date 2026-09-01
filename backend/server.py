@@ -111,6 +111,7 @@ class DownloadRequest(BaseModel):
     skip_videos: bool = False
     skip_audio: bool = False
     skip_google_files: bool = False
+    max_workers: int = 4  # 1–8 parallel download connections
 
 class BrowseRequest(BaseModel):
     title: str = "Select"
@@ -329,6 +330,7 @@ def run_download_thread(
     token_file: str,
     file_filters: dict,
     skip_google_files: bool,
+    max_workers: int = 4,
 ):
     """Runs the download in a background thread and feeds logs to the queue."""
     def log_cb(msg: str):
@@ -350,6 +352,7 @@ def run_download_thread(
             download_dir=dest_dir,
             file_filters=file_filters,
             skip_google_files=skip_google_files,
+            max_workers=max_workers,
         )
 
         if state.cancel_event.is_set():
@@ -439,7 +442,7 @@ async def start_download(req: DownloadRequest):
     # Start thread
     thread = threading.Thread(
         target=run_download_thread,
-        args=(folder_id, dest_dir, secret_file, token_file, file_filters, req.skip_google_files),
+        args=(folder_id, dest_dir, secret_file, token_file, file_filters, req.skip_google_files, req.max_workers),
         daemon=True,
     )
     thread.start()

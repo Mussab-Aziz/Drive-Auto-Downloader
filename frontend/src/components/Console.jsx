@@ -22,6 +22,28 @@ function formatSize(mb) {
   return `${mb} MB`
 }
 
+// ── Combined speed banner (parallel mode) ────────────────────────────────────
+
+function CombinedSpeedBar({ totalSpeedMbps, activeCount }) {
+  const speed = formatSpeed(totalSpeedMbps)
+  return (
+    <div className="combined-speed-wrap">
+      <div className="combined-speed-left">
+        <span className="combined-speed-dot" />
+        <span className="combined-speed-label">
+          {activeCount} file{activeCount !== 1 ? 's' : ''} downloading in parallel
+        </span>
+      </div>
+      <div className="combined-speed-right">
+        {speed
+          ? <span className="combined-speed-value">⚡ {speed} combined</span>
+          : <span className="combined-speed-value dim">⚡ Starting…</span>
+        }
+      </div>
+    </div>
+  )
+}
+
 // ── Active Live Download Progress Bar ────────────────────────────────────────
 
 function ActiveProgressBar({ percent, speedMbps, etaSec, sizeMb }) {
@@ -66,7 +88,7 @@ function ActiveProgressBar({ percent, speedMbps, etaSec, sizeMb }) {
   )
 }
 
-// ── Overall file counter bar (improvement B) ──────────────────────────────────
+// ── Overall file counter bar ──────────────────────────────────────────────────
 
 function OverallProgress({ current, total }) {
   const pct = total > 0 ? Math.round((current / total) * 100) : 0
@@ -85,15 +107,17 @@ function OverallProgress({ current, total }) {
 
 // ── Console component ─────────────────────────────────────────────────────────
 
-export default function Console({ logs, onClear, overallProgress, activeProgress }) {
+export default function Console({ logs, onClear, overallProgress, activeProgress, combinedSpeed }) {
   const boxRef = useRef(null)
 
-  // Auto-scroll on new logs or progress updates
   useEffect(() => {
     if (boxRef.current) {
       boxRef.current.scrollTop = boxRef.current.scrollHeight
     }
-  }, [logs, activeProgress])
+  }, [logs, activeProgress, combinedSpeed])
+
+  // In parallel mode show the combined banner instead of the single-file bar
+  const isParallel = combinedSpeed && combinedSpeed.activeCount > 1
 
   return (
     <div className="card console-wrap" style={{ flex: 1, minHeight: 0, marginBottom: 0 }}>
@@ -125,7 +149,7 @@ export default function Console({ logs, onClear, overallProgress, activeProgress
       )}
 
       <div className="console-box" ref={boxRef}>
-        {logs.length === 0 && !activeProgress ? (
+        {logs.length === 0 && !activeProgress && !combinedSpeed ? (
           <span className="log-empty">Waiting for download to start...</span>
         ) : (
           <>
@@ -135,8 +159,16 @@ export default function Console({ logs, onClear, overallProgress, activeProgress
               </span>
             ))}
 
-            {/* Active download progress bar - only shown during live transfer */}
-            {activeProgress && (
+            {/* Parallel mode: combined throughput banner */}
+            {isParallel && (
+              <CombinedSpeedBar
+                totalSpeedMbps={combinedSpeed.totalSpeedMbps}
+                activeCount={combinedSpeed.activeCount}
+              />
+            )}
+
+            {/* Single-file mode: individual progress bar */}
+            {!isParallel && activeProgress && (
               <ActiveProgressBar
                 percent={activeProgress.percent}
                 speedMbps={activeProgress.speedMbps}
