@@ -172,13 +172,28 @@ class GoogleDriveDownloader:
         self.session = AuthorizedSession(creds)
         return creds
 
+    def _new_session(self) -> AuthorizedSession:
+        """
+        Create a brand-new AuthorizedSession, explicitly closing the old one
+        first so its underlying urllib3 connection pool is fully released.
+        Calling this after each file prevents stale TCP connections from
+        accumulating in the pool and throttling speed over long runs.
+        """
+        if self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+        self.session = AuthorizedSession(self.creds)
+        return self.session
+
     def get_session(self) -> AuthorizedSession:
         """Get or initialize an AuthorizedSession for direct unbuffered HTTP streaming."""
         if self.creds is None or not self.creds.valid:
             self.creds = self.authenticate()
-            self.session = AuthorizedSession(self.creds)
-        elif self.session is None:
-            self.session = AuthorizedSession(self.creds)
+            return self._new_session()
+        if self.session is None:
+            return self._new_session()
         return self.session
 
     def re_authenticate(self):
@@ -444,7 +459,9 @@ class GoogleDriveDownloader:
             samples = []  # [(timestamp, cumulative_bytes_done)]
 
             try:
-                session = self.get_session()
+                # Always get a fresh session for every download attempt so the
+                # urllib3 connection pool never accumulates stale TCP sockets.
+                session = self._new_session()
 
                 # Always emit current progress so the bar shows immediately
                 progress_percent = int((bytes_done / total_bytes) * 100) if total_bytes > 0 else 0
@@ -526,8 +543,13 @@ class GoogleDriveDownloader:
 
                     # Open in append mode so we add bytes to what's already on disk
                     write_mode = 'ab' if bytes_done > 0 else 'wb'
+                    # 1 MB chunks: fewer Python iterations = less GIL contention
+                    # and better throughput than 64 KB chunks.
+                    CHUNK = 1 * 1024 * 1024
+                    FLUSH_EVERY = 16 * 1024 * 1024  # flush OS write buffer every 16 MB
+                    bytes_since_flush = 0
                     with open(part_path, write_mode) as fh:
-                        for chunk in response.iter_content(chunk_size=64 * 1024):
+                        for chunk in response.iter_content(chunk_size=CHUNK):
                             if self.cancel_event and self.cancel_event.is_set():
                                 self.log(f"[INFO] {label} cancelled.")
                                 fh.flush()
@@ -537,6 +559,14 @@ class GoogleDriveDownloader:
                             if chunk:
                                 fh.write(chunk)
                                 bytes_done += len(chunk)
+                                bytes_since_flush += len(chunk)
+
+                                # Periodically flush to prevent OS write-buffer
+                                # starvation from starving the download thread.
+                                if bytes_since_flush >= FLUSH_EVERY:
+                                    fh.flush()
+                                    bytes_since_flush = 0
+
                                 now = time.time()
 
                                 # Emit progress updates every 80ms (~12 FPS)
