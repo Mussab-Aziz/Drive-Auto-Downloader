@@ -13,7 +13,6 @@ export default function App() {
     updateField,
     logs,
     activeProgress,
-    combinedSpeed,
     clearLogs,
     isDownloading,
     status,
@@ -58,7 +57,6 @@ export default function App() {
             skipVideos={config.skip_videos}
             skipAudio={config.skip_audio}
             skipGoogleFiles={config.skip_google_files}
-            maxWorkers={config.max_workers ?? 4}
             onChange={updateField}
             disabled={isDownloading}
           />
@@ -72,7 +70,6 @@ export default function App() {
               onClear={clearLogs}
               overallProgress={overallProgress}
               activeProgress={activeProgress}
-              combinedSpeed={combinedSpeed}
             />
 
             {/* Inline action buttons inside right panel */}

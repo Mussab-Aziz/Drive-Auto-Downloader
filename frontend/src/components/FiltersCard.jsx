@@ -21,10 +21,7 @@ function Toggle({ id, label, emoji, checked, onChange, disabled }) {
   )
 }
 
-export default function FiltersCard({
-  skipPhotos, skipVideos, skipAudio, skipGoogleFiles,
-  maxWorkers, onChange, disabled,
-}) {
+export default function FiltersCard({ skipPhotos, skipVideos, skipAudio, skipGoogleFiles, onChange, disabled }) {
   return (
     <div className="card">
       <div className="card-title">
@@ -75,31 +72,6 @@ export default function FiltersCard({
           onChange={v => onChange('skip_google_files', v)}
           disabled={disabled}
         />
-      </div>
-
-      {/* ── Parallel connections slider ────────────────────────────── */}
-      <div className="parallel-row">
-        <div className="parallel-label">
-          <span>⚡ Parallel Connections</span>
-          <span className="parallel-badge">{maxWorkers}</span>
-        </div>
-        <input
-          id="parallel-slider"
-          type="range"
-          min={1}
-          max={8}
-          step={1}
-          value={maxWorkers}
-          disabled={disabled}
-          onChange={e => onChange('max_workers', Number(e.target.value))}
-          className="parallel-slider"
-          style={{ opacity: disabled ? 0.5 : 1 }}
-        />
-        <div className="parallel-hints">
-          <span>1 (safe)</span>
-          <span>4 (recommended)</span>
-          <span>8 (max)</span>
-        </div>
       </div>
     </div>
   )

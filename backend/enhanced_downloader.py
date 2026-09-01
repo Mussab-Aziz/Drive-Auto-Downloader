@@ -3,8 +3,6 @@ import json
 import os
 import re
 import time
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Optional
 from google.oauth2.credentials import Credentials
@@ -114,12 +112,6 @@ class GoogleDriveDownloader:
         self.session = None
         self.downloaded_count = 0
         self.skipped_count = 0
-        # ── Thread-safety primitives for parallel downloads ──────────────────
-        self._creds_lock   = threading.Lock()  # serialise credential refresh
-        self._log_lock     = threading.Lock()  # serialise log_callback calls
-        self._speed_lock   = threading.Lock()  # protect shared speed tracker
-        self._active_speeds: dict = {}         # {label: speed_bps} per active thread
-        self._count_lock   = threading.Lock()  # protect downloaded/skipped counters
 
     def log(self, message: str):
         """Log a message using the callback or print."""
@@ -182,8 +174,10 @@ class GoogleDriveDownloader:
 
     def _new_session(self) -> AuthorizedSession:
         """
-        Recreate self.session (the singleton used by non-parallel paths),
-        explicitly closing the old one first to release the urllib3 pool.
+        Create a brand-new AuthorizedSession, explicitly closing the old one
+        first so its underlying urllib3 connection pool is fully released.
+        Calling this after each file prevents stale TCP connections from
+        accumulating in the pool and throttling speed over long runs.
         """
         if self.session is not None:
             try:
@@ -192,14 +186,6 @@ class GoogleDriveDownloader:
                 pass
         self.session = AuthorizedSession(self.creds)
         return self.session
-
-    def _make_thread_session(self) -> AuthorizedSession:
-        """
-        Create a **thread-local** AuthorizedSession that is never stored in
-        self.session.  Each parallel worker calls this so threads never share
-        or overwrite each other's HTTP connections.
-        """
-        return AuthorizedSession(self.creds)
 
     def get_session(self) -> AuthorizedSession:
         """Get or initialize an AuthorizedSession for direct unbuffered HTTP streaming."""
@@ -453,192 +439,185 @@ class GoogleDriveDownloader:
         initial_size_mb = round(known_size / (1024 * 1024), 1) if known_size else None
         url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
 
-        # .part sidecar file — keeps partial data separate from completed files.
-        # On each retry, offset = current .part size → resumes from exact byte.
+        # Use a .part sidecar file so partial data is never mixed with complete files.
+        # On each retry the offset is read from the part file's current size so we
+        # resume exactly where the connection dropped — no re-downloading from byte 0.
         part_path = file_path.with_suffix(file_path.suffix + '.part')
-        total_bytes = known_size or 0
+        total_bytes = known_size or 0  # updated on first successful response
         size_mb = initial_size_mb
 
-        # Thread-local session: never touches self.session so parallel workers
-        # don't clobber each other's connections.
-        local_session = self._make_thread_session()
-        try:
-            while True:
+        while True:
+            if self.cancel_event and self.cancel_event.is_set():
+                return False
+
+            # How many bytes we already have on disk from a previous attempt
+            bytes_done = part_path.stat().st_size if part_path.exists() else 0
+
+            success = False
+            start_time = time.time()
+            last_emit_time = 0
+            samples = []  # [(timestamp, cumulative_bytes_done)]
+
+            try:
+                # Always get a fresh session for every download attempt so the
+                # urllib3 connection pool never accumulates stale TCP sockets.
+                session = self._new_session()
+
+                # Always emit current progress so the bar shows immediately
+                progress_percent = int((bytes_done / total_bytes) * 100) if total_bytes > 0 else 0
+                self.log(json.dumps({
+                    "type": "progress",
+                    "percent": progress_percent,
+                    "speed_mbps": 0,
+                    "eta_sec": None,
+                    "size_mb": size_mb,
+                }))
+
+                # Send Range header if we already have some bytes
+                headers = {}
+                if bytes_done > 0:
+                    headers["Range"] = f"bytes={bytes_done}-"
+                    self.log(f"[~] Resuming '{label}' from {round(bytes_done / (1024 * 1024), 1)} MB…")
+
+                with session.get(url, stream=True, timeout=45, headers=headers) as response:
+                    if response.status_code == 429:
+                        attempt += 1
+                        wait_sec = 10
+                        self.log(
+                            f"[!] Rate limit hit (HTTP 429) on attempt {attempt}. "
+                            f"Waiting 10s… (press Stop to cancel)"
+                        )
+                        for _ in range(wait_sec):
+                            if self.cancel_event and self.cancel_event.is_set():
+                                return False
+                            time.sleep(1)
+                        continue
+
+                    if response.status_code == 401:
+                        self.log("[!] Access token expired during download. Refreshing credentials...")
+                        self.creds.refresh(Request())
+                        self.session = AuthorizedSession(self.creds)
+                        continue
+
+                    if response.status_code == 404:
+                        self.log(f"[!] ❌ File '{label}' not found or deleted on Google Drive (HTTP 404). Skipping.")
+                        part_path.unlink(missing_ok=True)
+                        return False
+                    if response.status_code == 403:
+                        self.log(f"[!] ❌ Access denied for file '{label}' (HTTP 403). Check sharing permissions. Skipping.")
+                        part_path.unlink(missing_ok=True)
+                        return False
+
+                    # 206 = partial content (Range accepted), 200 = full response
+                    if response.status_code == 416:
+                        # 416 Range Not Satisfiable — server says offset is past EOF,
+                        # meaning we already have the complete file. Rename and finish.
+                        self.log(f"[~] '{label}' appears already complete (HTTP 416). Finalising…")
+                        part_path.rename(file_path)
+                        return True
+
+                    if response.status_code not in (200, 206):
+                        response.raise_for_status()
+
+                    # If the server returned 200 (doesn't support Range), restart from 0
+                    if response.status_code == 200 and bytes_done > 0:
+                        self.log(f"[~] Server doesn't support resume for '{label}'. Restarting from 0…")
+                        bytes_done = 0
+                        part_path.unlink(missing_ok=True)
+
+                    # Update total size from Content-Length / Content-Range header
+                    content_length = int(response.headers.get('Content-Length', 0) or 0)
+                    if response.status_code == 206:
+                        # Content-Range: bytes start-end/total
+                        cr = response.headers.get('Content-Range', '')
+                        try:
+                            total_bytes = int(cr.split('/')[-1])
+                        except (ValueError, IndexError):
+                            total_bytes = bytes_done + content_length
+                    elif content_length:
+                        total_bytes = content_length
+                    elif known_size:
+                        total_bytes = known_size
+
+                    size_mb = round(total_bytes / (1024 * 1024), 1) if total_bytes else initial_size_mb
+
+                    # Open in append mode so we add bytes to what's already on disk
+                    write_mode = 'ab' if bytes_done > 0 else 'wb'
+                    # 1 MB chunks: fewer Python iterations = less GIL contention
+                    # and better throughput than 64 KB chunks.
+                    CHUNK = 1 * 1024 * 1024
+                    FLUSH_EVERY = 16 * 1024 * 1024  # flush OS write buffer every 16 MB
+                    bytes_since_flush = 0
+                    with open(part_path, write_mode) as fh:
+                        for chunk in response.iter_content(chunk_size=CHUNK):
+                            if self.cancel_event and self.cancel_event.is_set():
+                                self.log(f"[INFO] {label} cancelled.")
+                                fh.flush()
+                                # Keep the .part file so the next run can resume
+                                return False
+
+                            if chunk:
+                                fh.write(chunk)
+                                bytes_done += len(chunk)
+                                bytes_since_flush += len(chunk)
+
+                                # Periodically flush to prevent OS write-buffer
+                                # starvation from starving the download thread.
+                                if bytes_since_flush >= FLUSH_EVERY:
+                                    fh.flush()
+                                    bytes_since_flush = 0
+
+                                now = time.time()
+
+                                # Emit progress updates every 80ms (~12 FPS)
+                                if now - last_emit_time >= 0.08 or (total_bytes > 0 and bytes_done >= total_bytes):
+                                    last_emit_time = now
+                                    samples.append((now, bytes_done))
+                                    if len(samples) > 8:
+                                        samples = samples[-8:]
+
+                                    if len(samples) >= 2 and (samples[-1][0] - samples[0][0]) > 0.001:
+                                        delta_bytes = samples[-1][1] - samples[0][1]
+                                        delta_time = samples[-1][0] - samples[0][0]
+                                        speed_bps = delta_bytes / delta_time
+                                    else:
+                                        elapsed = now - start_time
+                                        speed_bps = bytes_done / elapsed if elapsed > 0.001 else 0
+
+                                    speed_mbps = round(speed_bps / (1024 * 1024), 2)
+                                    progress_percent = int((bytes_done / total_bytes) * 100) if total_bytes > 0 else 0
+                                    remaining = max(total_bytes - bytes_done, 0)
+                                    eta_sec = int(remaining / speed_bps) if speed_bps > 1024 else None
+
+                                    self.log(json.dumps({
+                                        "type": "progress",
+                                        "percent": progress_percent,
+                                        "speed_mbps": speed_mbps,
+                                        "eta_sec": eta_sec,
+                                        "size_mb": size_mb,
+                                    }))
+
+                # Rename .part → final filename only on full success
+                part_path.rename(file_path)
+                success = True
+                return True
+
+            except Exception as e:
+                attempt += 1
+                wait_sec = 10
+                clean_err = format_network_error(e)
+                # Tell the user exactly how many MB were saved so they know work isn't lost
+                saved_mb = round(part_path.stat().st_size / (1024 * 1024), 1) if part_path.exists() else 0
+                self.log(
+                    f"[!] Connection dropped downloading '{label}' (attempt {attempt}): {clean_err}. "
+                    f"{saved_mb} MB saved — will resume in 10s. (press Stop to cancel)"
+                )
+
+            # Sleep in 1-second ticks so Cancel is always responsive
+            for _ in range(wait_sec):
                 if self.cancel_event and self.cancel_event.is_set():
                     return False
-
-                bytes_done = part_path.stat().st_size if part_path.exists() else 0
-                start_time = time.time()
-                last_emit_time = 0
-                samples = []  # [(timestamp, cumulative_bytes_done)]
-
-                try:
-                    # Emit current progress immediately (0% or resume offset)
-                    progress_percent = int((bytes_done / total_bytes) * 100) if total_bytes > 0 else 0
-                    self.log(json.dumps({
-                        "type": "progress",
-                        "percent": progress_percent,
-                        "speed_mbps": 0,
-                        "eta_sec": None,
-                        "size_mb": size_mb,
-                    }))
-
-                    req_headers = {}
-                    if bytes_done > 0:
-                        req_headers["Range"] = f"bytes={bytes_done}-"
-                        self.log(f"[~] Resuming '{label}' from {round(bytes_done / (1024 * 1024), 1)} MB…")
-
-                    with local_session.get(url, stream=True, timeout=45, headers=req_headers) as response:
-                        if response.status_code == 429:
-                            attempt += 1
-                            self.log(
-                                f"[!] Rate limit hit (HTTP 429) on attempt {attempt}. "
-                                f"Waiting 10s… (press Stop to cancel)"
-                            )
-                            for _ in range(10):
-                                if self.cancel_event and self.cancel_event.is_set():
-                                    return False
-                                time.sleep(1)
-                            continue
-
-                        if response.status_code == 401:
-                            self.log("[!] Access token expired during download. Refreshing credentials...")
-                            with self._creds_lock:
-                                self.creds.refresh(Request())
-                            # Recreate the thread-local session with fresh credentials
-                            local_session.close()
-                            local_session = self._make_thread_session()
-                            continue
-
-                        if response.status_code == 404:
-                            self.log(f"[!] ❌ File '{label}' not found or deleted on Google Drive (HTTP 404). Skipping.")
-                            part_path.unlink(missing_ok=True)
-                            return False
-                        if response.status_code == 403:
-                            self.log(f"[!] ❌ Access denied for file '{label}' (HTTP 403). Check sharing permissions. Skipping.")
-                            part_path.unlink(missing_ok=True)
-                            return False
-
-                        # 416 = Range Not Satisfiable → file already complete on disk
-                        if response.status_code == 416:
-                            self.log(f"[~] '{label}' appears already complete (HTTP 416). Finalising…")
-                            part_path.rename(file_path)
-                            return True
-
-                        if response.status_code not in (200, 206):
-                            response.raise_for_status()
-
-                        # 200 when Range was requested → server ignores Range, restart
-                        if response.status_code == 200 and bytes_done > 0:
-                            self.log(f"[~] Server doesn't support resume for '{label}'. Restarting from 0…")
-                            bytes_done = 0
-                            part_path.unlink(missing_ok=True)
-
-                        # Determine total file size
-                        content_length = int(response.headers.get('Content-Length', 0) or 0)
-                        if response.status_code == 206:
-                            cr = response.headers.get('Content-Range', '')
-                            try:
-                                total_bytes = int(cr.split('/')[-1])
-                            except (ValueError, IndexError):
-                                total_bytes = bytes_done + content_length
-                        elif content_length:
-                            total_bytes = content_length
-                        elif known_size:
-                            total_bytes = known_size
-
-                        size_mb = round(total_bytes / (1024 * 1024), 1) if total_bytes else initial_size_mb
-
-                        write_mode = 'ab' if bytes_done > 0 else 'wb'
-                        CHUNK = 1 * 1024 * 1024        # 1 MB per read — fewer Python iterations
-                        FLUSH_EVERY = 16 * 1024 * 1024  # flush write buffer every 16 MB
-                        bytes_since_flush = 0
-
-                        with open(part_path, write_mode) as fh:
-                            for chunk in response.iter_content(chunk_size=CHUNK):
-                                if self.cancel_event and self.cancel_event.is_set():
-                                    self.log(f"[INFO] {label} cancelled.")
-                                    fh.flush()
-                                    return False  # keep .part for next resume
-
-                                if chunk:
-                                    fh.write(chunk)
-                                    bytes_done += len(chunk)
-                                    bytes_since_flush += len(chunk)
-
-                                    if bytes_since_flush >= FLUSH_EVERY:
-                                        fh.flush()
-                                        bytes_since_flush = 0
-
-                                    now = time.time()
-
-                                    if now - last_emit_time >= 0.08 or (total_bytes > 0 and bytes_done >= total_bytes):
-                                        last_emit_time = now
-                                        samples.append((now, bytes_done))
-                                        if len(samples) > 8:
-                                            samples = samples[-8:]
-
-                                        if len(samples) >= 2 and (samples[-1][0] - samples[0][0]) > 0.001:
-                                            delta_b = samples[-1][1] - samples[0][1]
-                                            delta_t = samples[-1][0] - samples[0][0]
-                                            speed_bps = delta_b / delta_t
-                                        else:
-                                            elapsed = now - start_time
-                                            speed_bps = bytes_done / elapsed if elapsed > 0.001 else 0
-
-                                        speed_mbps = round(speed_bps / (1024 * 1024), 2)
-                                        progress_percent = int((bytes_done / total_bytes) * 100) if total_bytes > 0 else 0
-                                        remaining = max(total_bytes - bytes_done, 0)
-                                        eta_sec = int(remaining / speed_bps) if speed_bps > 1024 else None
-
-                                        # Per-file progress event
-                                        self.log(json.dumps({
-                                            "type": "progress",
-                                            "percent": progress_percent,
-                                            "speed_mbps": speed_mbps,
-                                            "eta_sec": eta_sec,
-                                            "size_mb": size_mb,
-                                        }))
-
-                                        # ── Combined speed event for parallel mode ──
-                                        # Update shared speed tracker and broadcast total
-                                        with self._speed_lock:
-                                            self._active_speeds[label] = speed_bps
-                                            total_speed_bps = sum(self._active_speeds.values())
-                                            active_count = len(self._active_speeds)
-
-                                        self.log(json.dumps({
-                                            "type": "combined_speed",
-                                            "total_speed_mbps": round(total_speed_bps / (1024 * 1024), 2),
-                                            "active_count": active_count,
-                                        }))
-
-                    # ── Transfer complete ────────────────────────────────────────
-                    part_path.rename(file_path)
-                    return True
-
-                except Exception as e:
-                    attempt += 1
-                    clean_err = format_network_error(e)
-                    saved_mb = round(part_path.stat().st_size / (1024 * 1024), 1) if part_path.exists() else 0
-                    self.log(
-                        f"[!] Connection dropped downloading '{label}' (attempt {attempt}): {clean_err}. "
-                        f"{saved_mb} MB saved — will resume in 10s. (press Stop to cancel)"
-                    )
-
-                for _ in range(10):
-                    if self.cancel_event and self.cancel_event.is_set():
-                        return False
-                    time.sleep(1)
-
-        finally:
-            # Always remove from the shared speed tracker when this download ends
-            with self._speed_lock:
-                self._active_speeds.pop(label, None)
-            try:
-                local_session.close()
-            except Exception:
-                pass
+                time.sleep(1)
 
     # ── Public download methods ───────────────────────────────────────────────
 
@@ -668,7 +647,6 @@ class GoogleDriveDownloader:
         download_dir: str,
         file_filters: Optional[dict] = None,
         skip_google_files: bool = False,
-        max_workers: int = 4,
     ):
         """
         Download an entire Google Drive folder while preserving structure.
@@ -681,9 +659,6 @@ class GoogleDriveDownloader:
             skip_google_files:  When True, Google Workspace files (Docs, Sheets,
                                 Slides, Drawings) are logged and counted as skipped.
                                 When False they are silently passed over.
-            max_workers:        Number of files to download simultaneously (1–8).
-                                1 = sequential (original behaviour).
-                                4 = default; typically saturates a 60 Mbps connection.
         """
         if file_filters is None:
             file_filters = {}
@@ -740,23 +715,23 @@ class GoogleDriveDownloader:
 
             self.downloaded_count = 0
             self.skipped_count = 0
-
-            # ── Phase 1: Sequential filter pass (fast — disk checks only) ──────
-            # Collect skip messages and build the downloadable_items list before
-            # submitting to the thread pool.
-            downloadable_items = []  # [(file_id, file_path, part_path, relative_path, file_size)]
+            # Counts only files actually attempted this session (not pre-existing ones)
+            file_index = 0
 
             for file_id, file_name, mime_type, relative_path, file_size in items:
+                # Check for cancellation at the top of every iteration
                 if self.cancel_event and self.cancel_event.is_set():
                     self.log("[INFO] Download cancelled by user.")
                     break
 
+                # ── Google Workspace native files ─────────────────────────
                 if 'vnd.google-apps' in mime_type:
                     if skip_google_files:
                         self.log(f"Skipping: '{relative_path}' (Google Workspace file)")
                         self.skipped_count += 1
                     continue
 
+                # ── File type filters ────────────────────────────────────
                 if self.should_filter_file(mime_type, file_filters):
                     self.log(f"Skipping: '{relative_path}' (Filtered by type)")
                     self.skipped_count += 1
@@ -765,72 +740,33 @@ class GoogleDriveDownloader:
                 file_path = download_path / relative_path
                 part_path = file_path.with_suffix(file_path.suffix + '.part')
 
+                # ── Already downloaded (complete file) ───────────────────
                 if file_path.exists():
                     self.log(f"Skipping: '{relative_path}' (Already exists)")
                     self.skipped_count += 1
                     continue
 
-                downloadable_items.append((file_id, file_path, part_path, relative_path, file_size))
+                file_index += 1
+                # Report progress against remaining_count (files still needed this session)
+                # so on a resume the bar correctly shows "1 of 35" not "1 of 135".
+                self.log(json.dumps({
+                    "type": "overall_progress",
+                    "current": file_index,
+                    "total": remaining_count,
+                }))
 
-            if not downloadable_items or (self.cancel_event and self.cancel_event.is_set()):
-                return  # nothing left to do; fall through to summary
+                # Show resume message if we have a partial download already
+                if part_path.exists():
+                    saved_mb = round(part_path.stat().st_size / (1024 * 1024), 1)
+                    self.log(f"\nResuming: {relative_path} ({saved_mb} MB already downloaded)")
+                else:
+                    self.log(f"\nDownloading: {relative_path}")
 
-            # ── Phase 2: Parallel download pool ─────────────────────────────────
-            effective_workers = min(max_workers, len(downloadable_items))
-            if effective_workers > 1:
-                self.log(
-                    f"\n⚡ Starting {effective_workers} parallel connections "
-                    f"({len(downloadable_items)} files remaining)…"
-                )
-            else:
-                self.log(f"Starting download of {len(downloadable_items)} file(s)…")
-
-            # Thread-safe file index counter
-            _idx_lock = threading.Lock()
-            file_index = [0]  # mutable via list so closure can write it
-
-            def _download_worker(item):
-                """Worker executed by each thread in the pool."""
-                w_file_id, w_file_path, w_part_path, w_rel_path, w_file_size = item
-
-                if self.cancel_event and self.cancel_event.is_set():
-                    return
-
-                # Claim the next index slot atomically
-                with _idx_lock:
-                    file_index[0] += 1
-                    idx = file_index[0]
-                    self.log(json.dumps({
-                        "type": "overall_progress",
-                        "current": idx,
-                        "total": remaining_count,
-                    }))
-                    if w_part_path.exists():
-                        saved_mb = round(w_part_path.stat().st_size / (1024 * 1024), 1)
-                        self.log(f"\nResuming: {w_rel_path} ({saved_mb} MB already downloaded)")
-                    else:
-                        self.log(f"\nDownloading: {w_rel_path}")
-
-                result = self._download_with_retry(w_file_id, w_file_path, w_rel_path, w_file_size)
-
-                with self._count_lock:
-                    if result:
-                        self.downloaded_count += 1
-                    else:
-                        self.skipped_count += 1
-
-                if result:
-                    self.log(f"✓ Successfully downloaded: {w_rel_path}")
-
-            with ThreadPoolExecutor(max_workers=effective_workers) as pool:
-                futures = {pool.submit(_download_worker, item): item for item in downloadable_items}
-                for fut in as_completed(futures):
-                    try:
-                        fut.result()  # re-raise worker exceptions on the main thread
-                    except Exception as exc:
-                        _, _, _, rel, _ = futures[fut]
-                        if not (self.cancel_event and self.cancel_event.is_set()):
-                            self.log(f"[ERROR] Unexpected error downloading '{rel}': {exc}")
+                if self.download_file(file_id, file_path, file_size):
+                    self.log(f"✓ Successfully downloaded: {relative_path}")
+                    self.downloaded_count += 1
+                else:
+                    self.skipped_count += 1
 
             self.log(f"\n{'=' * 60}")
             self.log("✓ Download completed!")

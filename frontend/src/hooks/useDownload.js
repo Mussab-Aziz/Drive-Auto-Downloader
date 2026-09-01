@@ -12,14 +12,12 @@ export function useDownload() {
     skip_videos: false,
     skip_audio: false,
     skip_google_files: false,
-    max_workers: 4,
   })
   const [logs, setLogs] = useState([])
-  const [activeProgress, setActiveProgress] = useState(null)
-  const [combinedSpeed, setCombinedSpeed] = useState(null) // {totalSpeedMbps, activeCount} | null
+  const [activeProgress, setActiveProgress] = useState(null) // {percent, speedMbps, etaSec, sizeMb} | null
   const [isDownloading, setIsDownloading] = useState(false)
-  const [status, setStatus] = useState('idle')
-  const [overallProgress, setOverallProgress] = useState(null)
+  const [status, setStatus] = useState('idle') // 'idle' | 'running' | 'done'
+  const [overallProgress, setOverallProgress] = useState(null) // {current, total} | null
   const esRef = useRef(null)
 
   // Load config on mount
@@ -101,7 +99,6 @@ export function useDownload() {
       if (raw === '__PING__') return
       if (raw === '__DONE__') {
         setActiveProgress(null)
-        setCombinedSpeed(null)
         setIsDownloading(false)
         setStatus('done')
         setOverallProgress(null)
@@ -125,16 +122,7 @@ export function useDownload() {
           return
         }
 
-        // Combined speed across all parallel downloads
-        if (parsed.type === 'combined_speed') {
-          setCombinedSpeed({
-            totalSpeedMbps: parsed.total_speed_mbps ?? 0,
-            activeCount: parsed.active_count ?? 1,
-          })
-          return
-        }
-
-        // Overall file counter
+        // Overall file counter (improvement B)
         if (parsed.type === 'overall_progress') {
           setOverallProgress({ current: parsed.current, total: parsed.total })
           return
@@ -175,7 +163,6 @@ export function useDownload() {
 
     es.onerror = () => {
       setActiveProgress(null)
-      setCombinedSpeed(null)
       setIsDownloading(false)
       setStatus('idle')
       setOverallProgress(null)
@@ -236,7 +223,6 @@ export function useDownload() {
   const clearLogs = useCallback(() => {
     setLogs([])
     setActiveProgress(null)
-    setCombinedSpeed(null)
   }, [])
 
   const switchAccount = useCallback(async () => {
@@ -269,7 +255,6 @@ export function useDownload() {
     updateField,
     logs,
     activeProgress,
-    combinedSpeed,
     clearLogs,
     isDownloading,
     status,
