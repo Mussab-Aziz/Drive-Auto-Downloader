@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -65,6 +66,22 @@ def format_network_error(e: Exception) -> str:
     if "Max retries exceeded" in err_str:
         return "Network connection unavailable"
     return err_str
+
+
+def sanitize_filename(name: str) -> str:
+    """
+    Replace characters that are illegal in Windows file names so that the tool
+    uses the same name the browser uses when a user downloads files manually
+    from the Google Drive web interface.
+
+    Illegal on Windows: \ / : * ? " < > |
+    Also strip trailing dots/spaces which Windows silently removes.
+    """
+    # Replace every illegal character with an underscore
+    sanitized = re.sub(r'[\\/:*?"<>|]', '_', name)
+    # Windows silently strips trailing dots and spaces from file/dir names
+    sanitized = sanitized.rstrip('. ')
+    return sanitized or '_'  # never return an empty string
 
 
 
@@ -350,7 +367,7 @@ class GoogleDriveDownloader:
             # ── Process page results ──────────────────────────────────────
             files = results.get('files', [])
             for file_info in files:
-                file_name = file_info['name'].strip()
+                file_name = sanitize_filename(file_info['name'].strip())
                 relative_path = f"{prefix}/{file_name}" if prefix else file_name
                 file_size = int(file_info.get('size', 0) or 0)
 
@@ -630,7 +647,7 @@ class GoogleDriveDownloader:
             else:
                 # Single file link — build a synthetic one-item list so the
                 # download loop below runs without any special-casing.
-                file_name = item_info['name'].strip()
+                file_name = sanitize_filename(item_info['name'].strip())
                 mime_type = item_info.get('mimeType', '')
                 file_size = int(item_info.get('size', 0) or 0)
                 self.log(f"Single file detected: '{file_name}'")
